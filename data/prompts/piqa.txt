@@ -1,0 +1,17 @@
+Input: how do you flood a room? \n (A) fill it with objects. (B) fill it with water.
+Knowledge: Too much water can cause flooding.
+
+Input: How can I get oil stains out of my driveway? \n (A) Douse each stain with a couple cans of beer. (B) Douse each stain with a couple cans of soda.
+Knowledge: Sodium carbonate solution can wash away oil stains.
+
+Input: Soothe a painful sunburn. \n (A) Wait until brewed tea bag is cool, then apply on burn. (B) Wait until brewed tea bag is hot, then apply on burn.
+Knowledge: Sunburn can be alleviated by applying cold material.
+
+Input: What can I use for fuel in an alcohol stove? \n (A) Use acetone. (B) Use vinegar.
+Knowledge: Acetone is flammable, while vinegar is not.
+
+Input: How can I cut the handles of metal cutlery? \n (A) Use a hand saw to cut the handles. (B) Use a hand drill to cut the handles.
+Knowledge: A hand saw is used for making cuts; a hand drill is used for making holes.
+
+Input: {question}
+Knowlegde:

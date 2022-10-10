@@ -1,5 +1,6 @@
 import os
 import json
+import copy
 from collections import defaultdict
 import argparse
 import itertools
@@ -99,8 +100,8 @@ class PPOTrainer:
         results['loss/value'] = vf_loss
 
     def train(self, step_num):
-        self.eval(step=step_num)
         self.save(step=step_num)
+        self.eval(step=step_num)
 
         try:
             batch = next(self.train_sampler)
@@ -220,7 +221,7 @@ class PPOTrainer:
                     'answer': choices[answer_ix],
                     'knowledges': knowledges,
                 }
-                knowledge_outputs.append(item)
+                knowledge_outputs.append(copy.deepcopy(item))
                 item.update({
                     'scores_': results['answer_logitss'][:, i, :len(choices)].tolist(),
                     'probs_': results['answer_probss'][:, i, :len(choices)].tolist(),
@@ -258,9 +259,9 @@ class PPOTrainer:
     def set_reward_norm(self):
         rewards = []
         for batch in tqdm(self.train_dataloader):
-            # TODO: Try temperature sampling here
             results = self.policy_model.sample(
                 text=batch['question'],
+                temperature=self.args.temperature,
             )
             reward_results = self.reward_model.get_reward(
                 questions=batch['question'],

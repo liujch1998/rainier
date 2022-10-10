@@ -1,0 +1,17 @@
+Input: Then, the man writes over the snow covering the window of a car, and a woman wearing winter clothes smiles. then \n (A) , the man adds wax to the windshield and cuts it. (B) , a person board a ski lift, while two men supporting the head of the person wearing winter clothes snow as the we girls sled. (C) , the man puts on a christmas coat, knitted with netting. (D) , the man continues removing the snow on his car.
+Knowledge: Snow must be removed from a car before one can drive it.
+
+Input: The man in the center is demonstrating a hairstyle on the person wearing the blue shirt. the man in the blue shirt \n (A) is standing on the sponge cutting the hair of the person wearing the blue shirt. (B) is doing the hairstyle with his hand and the hairspray. (C) sits on the chair next to the sink. (D) is being shown eye to eye.
+Knowledge: One should sit still when getting a haircut.
+
+Input:  The roof is done and a view of the entire house is shown to show off the finished roof. the woman \n (A) is standing in front of the home, smiling while talking. (B) interviews the man again and leaves the room. (C) shows the soil with two lay-ups of shingle and applies a layer onto the top shingle. (D) stacks the bags on the side and begins putting stencils on the top.
+Knowledge: One usually feels pleased after finishing a home improvement project.
+
+Input: People practice ballet in a studio alone and in couples. then \n (A) , a man begins dancing and top dancing standing on the ground. (B) , a boy and a girl dance ballet, then a man enter and dance with the girl. (C) , the band performs ballet in the studio and in the open gathered. (D) , people dances and dances together, dancing.
+Knowledge: Ballet is a kind of dance.
+
+Input: A person is seen standing on a tennis court bouncing a ball. another man \n (A) takes his turn speaking to the camera. (B) walks up hitting a birdie. (C) is seen standing ready on the other side in front of a large audience. (D) is holding the racket next to him.
+Knowledge: The player who bounces the ball is the one who serves.
+
+Input: {question}
+Knowledge:

@@ -1,0 +1,17 @@
+Input: The GPS and map helped me navigate home.  I got lost when the _ got turned off. \n (A) GPS (B) map
+Knowledge: A GPS device is electronic, while a map is paper-based.
+
+Input: I picked up a bag of peanuts and raisins for a snack. I wanted a sweeter snack out so I ate the _ for now. \n (A) raisins (B) peanuts
+Knowledge: Peanuts contain a lot of fat. Raisins contain a lot of sugar.
+
+Input: The geese prefer to nest in the fields rather than the forests because in the _ predators are more hidden. \n (A) fields (B) forests
+Knowledge: There are more trees in the forests than in the fields.
+
+Input: Once in Poland, Dennis enjoyed the trip more than Jason because _ had a shallow understanding of the Polish language. \n (A) Dennis (B) Jason
+Knowledge: Those who know the native language would enjoy the trip better.
+
+Input: Adam put handwash only clothes in the washer but Aaron washed them by hand as _ was lazy. \n (A) Adam (B) Aaron
+Knowledge: Washing clothes with washer takes less effort than by hand.
+
+Input: {question}
+Knowledge:

@@ -1,6 +1,11 @@
 /runs/
 /eval/
-/data
+/data/uqa
+/data/numersense
+/data/riddlesense
+/data/quartz
+/data/hellaswag
+/data/knowledge
 /model/
 **/__pycache__/
 *.swp

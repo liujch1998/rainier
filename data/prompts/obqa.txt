@@ -1,0 +1,17 @@
+Input: The sun is responsible for \n (A) puppies learning new tricks (B) children growing up and getting old (C) flowers wilting in a vase (D) plants sprouting, blooming and wilting
+Knowledge: Natural light provides energy for photosynthesis.
+
+Input: Poison causes harm to which of the following? \n (A) a Tree (B) a robot (C) a house (D) a car
+Knowledge: Living organisms are susceptible to poisonous matter.
+
+Input: As a car approaches you in the night \n (A) the headlights become more intense (B) the headlights recede into the dark (C) the headlights remain at a constant (D) the headlights turn off
+Knowledge: The intensity of light increases when observed from a shorter distance.
+
+Input: When the weather changes as it does from Christmas to Easter, \n (A) the air may chill (B) the ground may freeze (C) the plants may die (D) the ground may warm
+Knowledge: Christmas is in winter and Easter is in spring.
+
+Input: Using mirrors to focus collected light from heavenly bodies allows \n (A) detailed observation (B) foregone conclusions (C) radiation experiments (D) celestial music
+Knowledge: Telescopes use mirrors to focus light from the stars.
+
+Input: {question}
+Knowledge:

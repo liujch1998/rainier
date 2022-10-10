@@ -1,0 +1,17 @@
+Input: What will Quinn want to do next? \n (A) Eat messy snacks (B) help out a friend (C) Pick up the dirty clothes \n Quinn wanted to help me clean my room up because it was so messy.
+Knowledge: A messy room likely contains dirty clothes.
+
+Input: What will Aubrey want to do next? \n (A) help Aubrey go back home (B) keep on partying without the mom (C) going on with the mom \n Sasha's mom passed out in the middle of the party. Aubrey took Sasha's mom to the hospital.
+Knowledge: One should attend to their sick family member.
+
+Input: How would Jan feel afterwards? \n (A) scared of losing the cat (B) normal (C) relieved for fixing the problem \n Their cat kept trying to escape out of the window, so Jan placed an obstacle in the way.
+Knowledge: One usually has positive emotions after solving a problem.
+
+Input: How would Sydney feel afterwards? \n (A) affected (B) like they released their tension (C) worse \n Sydney had so much pent up emotion, they burst into tears at work.
+Knowledge: Crying can be a catharsis.
+
+Input: What does Sydney need to do before this? \n (A) be bad at her job (B) do a good job (C) be lazy \n Sydney got a raise and a new promotion.
+Knowledge: Pay raise and promotion are usually results of good job performance.
+
+Input: {question}
+Knowledge:
