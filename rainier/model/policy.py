@@ -4,7 +4,6 @@ import torch
 import torch.nn.functional as F
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 from utils.utils import logits_to_entropy, mask_pad
-from utils.lightning_model import *
 
 
 class Policy:
