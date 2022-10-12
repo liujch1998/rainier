@@ -96,8 +96,8 @@ def main():
             args.save_dir = args.save_dir.replace('runs/', 'eval/')
             ckp = args.load_from_ckpt.split('ckp_')[-1].strip('.pth')
             args.save_dir += f'_ckp-{ckp}'
-        elif args.ckpt is not None:
-            args.save_dir = os.path.dirname(args.ckpt)
+        elif args.eval_ckpt is not None:
+            args.save_dir = os.path.dirname(args.eval_ckpt)
         else:
             log.error('You must provide either --ckpt or --load_from_ckpt!')
             exit(-1)
@@ -218,8 +218,8 @@ def main():
             policy.model.load_state_dict(checkpoint['policy_model'])
             step_num = checkpoint['step']
             checkpoint.clear()
-        elif args.ckpt is not None:
-            checkpoint = torch.load(args.ckpt, map_location=torch.device('cpu'))
+        elif args.eval_ckpt is not None:
+            checkpoint = torch.load(args.eval_ckpt, map_location=torch.device('cpu'))
             policy.model.load_state_dict(checkpoint)
             checkpoint.clear()
             step_num = 0

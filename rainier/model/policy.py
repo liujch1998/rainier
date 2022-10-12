@@ -18,10 +18,11 @@ class Policy:
                  device_map = None,
                 ):
         self.tokenizer = T5Tokenizer.from_pretrained(model_type)
-        if model_ckpt is None:
-            self.model = T5ForConditionalGeneration.from_pretrained(model_type)
-        else:
-            self.model = load_lightning_model(checkpoint_path=model_ckpt, model_type=model_type)
+        self.model = T5ForConditionalGeneration.from_pretrained(model_type)
+        if model_ckpt is not None:
+            checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
+            self.model.load_state_dict(checkpoint)
+            checkpoint.clear()
         self.model.to(device)
         if device != 'cpu':
             self.model.parallelize(device_map=device_map)

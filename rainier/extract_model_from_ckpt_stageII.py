@@ -12,5 +12,5 @@ policy = Policy(
 checkpoint = torch.load(args.load_from_ckpt, map_location=torch.device('cpu'))
 policy.model.load_state_dict(checkpoint['policy_model'])
 
-torch.save(policy.model.state_dict(), f'../runs/rainier-large.pth')
+torch.save(policy.model.state_dict(), f'../model/rainier-large.pth')
 

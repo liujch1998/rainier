@@ -20,7 +20,7 @@ def get_args():
     parser.add_argument(
         '--model_type', type=str, default='t5-large', help='model used for policy, ref policy, and value')
     parser.add_argument(
-        '--model_ckpt', type=str, default='../model/rainier-large_stageI.ckpt', help='model ckpt used for policy and ref policy (NOT value!)')
+        '--model_ckpt', type=str, default='../model/rainier-large_stageI.pth', help='model ckpt used for policy and ref policy (NOT value!)')
     parser.add_argument(
         '--qa_model_type', type=str, default='allenai/unifiedqa-t5-large', help='model used for QA')
     parser.add_argument(
@@ -32,7 +32,7 @@ def get_args():
     parser.add_argument(
         '--load_from_ckpt', type=str, default=None, help='ckpt path to resume training or run eval')
     parser.add_argument(
-        '--ckpt', type=str, default='../model/rainier-large.pth', help='rainier ckpt to run eval')
+        '--eval_ckpt', type=str, default='../model/rainier-large.pth', help='rainier ckpt to run eval')
 
     # reward
     parser.add_argument(
