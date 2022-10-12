@@ -6,7 +6,6 @@ from transformers.modeling_outputs import TokenClassifierOutput
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from utils.utils import reduce_mean
 import copy
-from IPython import embed
 
 
 class T5ForTokenRegression(T5PreTrainedModel):

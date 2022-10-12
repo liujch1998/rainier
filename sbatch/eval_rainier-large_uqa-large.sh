@@ -12,6 +12,8 @@
 cat $0
 echo "--------------------"
 
+source "$CONDA_PREFIX/../../etc/profile.d/conda.sh"
+conda activate rainier
 cd /gscratch/xlab/liujc/rainier/rainier
 python main.py --mode eval --eval_baseline
 

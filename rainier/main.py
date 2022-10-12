@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 
 from args import get_args
-from utils.utils import ensure_dir, ceil_div, args_to_filename
+from utils.utils import ensure_dir, ceil_div
 from data import QADataset
 from model.policy import Policy
 from model.value import Value
@@ -81,7 +81,7 @@ def main():
             time = datetime.now()
             date_time = time.strftime('%b%d_%H-%M-%S')
             import socket
-            args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname() + args_to_filename(args))
+            args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname())
         args.reward_dir = os.path.join(args.save_dir, 'reward')
         args.model_dir = os.path.join(args.save_dir, 'model')
         args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
