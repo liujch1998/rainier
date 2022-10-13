@@ -14,3 +14,4 @@ dependencies:
   - numpy
   - tqdm
   - tensorboard
+  - gdown

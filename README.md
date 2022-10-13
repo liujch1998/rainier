@@ -10,13 +10,19 @@ conda env create -f environment.yml
 conda activate rainier
 ```
 
-Download the Rainier model from [here](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing) and put it at `/model/rainier-large.pth`
+Install [gsutil](https://cloud.google.com/storage/docs/gsutil_install).
+
+### Download model
+
+**Download the Rainier model**: Go to `/model/` and run `gdown 1qmxFTENNITA16_54dkqR6pHMDofa3Jee`
+Alternatively, you can download the `rainier-large.pth` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing) and put it under `/model/`
 
 ### Download data
 
-Download the UQA data by going to `/data/` and running `python download_uqa.py`
+**Download the UQA data**: Go to `/data/` and run `python download_uqa.py`
 
-Download the non-UQA data `non-uqa.zip` from [here](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing), unzip it, and put the 4 individual folders in `/data/`
+**Download the non-UQA data**: Go to `/data/` and run `gdown 1vfJQnqeRzr9MXPQmtbrAsQUuWZD1bZqF`
+Alternatively, you can download the `non-uqa.zip` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing), put it under `/data/` and unzip it. Make sure the 4 individual folders are directly under `/data/`
 
 ## Running inference
 
@@ -47,11 +53,15 @@ The Rainier model is trained in two stages.
 
 We trained this stage using 1x RTX6000 GPU with 24G memory.
 
-If you would like to skip this training stage, you can download the trained model `rainier-large_stageI.pth` from [here](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing), and put it under `/model/`
+If you would like to skip this training stage, you can download a copy of our ckpt.
+Go to `/model/` and run `gdown 1PeL3E7UreVIHKOkLNSyzgyAYoab-MA5N`
+Alternatively, you can download the `rainier-large_stageI.pth` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing) and put it under `/model/`
 
 First, generate silver knowledge from GPT-3.
 
-If you would like to use our pre-generated data, you can download the `knowledge.zip` from [here](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing), unzip it, and put it at `/data/knowledge/`
+If you would like to use our pre-generated data, you can download a copy of our pre-generated knowledge.
+Go to `/data/` and run `gdown 1V6Za8BfEwWa4xRgXcVEFhS8tWepHZPAw`
+Alternatively, you can download the `knowledge.zip` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing), unzip it and put it under `/data/`
 
 Otherwise, you can generate the knowledge yourself by going to the `/rainier/` directory and run
 ```
@@ -88,5 +98,5 @@ Some flags you can set (see the full list in `args.py`):
 --load_from_ckpt [path]     This resumes training from an existing ckpt.
 ```
 
-Make sure to run `python extract_model_from_ckpt_stageII.py --load_from_ckpt ../runs/[path-to-best].pth` after the training.
+Make sure to run `python extract_model_from_ckpt_stageII.py --load_from_ckpt ../runs/[path-to-best].pth` after the training, so that you can use the trained Rainier model for inference.
 

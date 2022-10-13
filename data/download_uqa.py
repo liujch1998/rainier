@@ -17,7 +17,7 @@ DATASETS = [
 
 import os, sys
 
-os.mkdir('uqa')
+os.makedirs('uqa', exist_ok=True)
 for ds in DATASETS:
     os.system(f'gsutil -m cp -r gs://unifiedqa/data/{ds} ./uqa/')
 

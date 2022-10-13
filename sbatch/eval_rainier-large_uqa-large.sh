@@ -7,7 +7,7 @@
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
 #SBATCH --time=240:00:00
-#SBATCH --output="/gscratch/xlab/liujc/sbatch/logs/%J.%x.out"
+#SBATCH --output="/gscratch/xlab/liujc/rainier/logs/%J.%x.out"
 
 cat $0
 echo "--------------------"
