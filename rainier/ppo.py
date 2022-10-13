@@ -93,7 +93,7 @@ class PPOTrainer:
         vf_loss = .5 * reduce_mean(torch.max(vf_losses1, vf_losses2), mask)
         vf_clipfrac = reduce_mean(torch.gt(vf_losses2, vf_losses1).float(), mask)
 
-        loss = pg_loss + self.args.vf_coef * vf_loss
+        loss = self.args.pg_coef * pg_loss + self.args.vf_coef * vf_loss
 
         results['loss/total'] = loss
         results['loss/policy'] = pg_loss

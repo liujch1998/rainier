@@ -48,6 +48,8 @@ def get_args():
 
     # ppo
     parser.add_argument(
+        '--pg_coef', type=float, default=1.0, help='policy loss coefficient')
+    parser.add_argument(
         '--vf_coef', type=float, default=1.0, help='value loss coefficient')
     parser.add_argument(
         '--cliprange', type=float, default=.2, help='clip parameter for policy gradient')
