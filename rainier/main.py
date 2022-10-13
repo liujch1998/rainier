@@ -155,6 +155,7 @@ def main():
         # TODO: Try initializing this with model_ckpt as well
         value = Value(
             model_type=args.model_type,
+            model_ckpt=args.model_ckpt if args.use_model_ckpt_for_value else None,
             device=devices[0],
             device_map=device_map,
         )

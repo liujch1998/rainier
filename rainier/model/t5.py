@@ -13,9 +13,12 @@ class T5ForTokenRegression(T5PreTrainedModel):
         r"encoder\.embed_tokens\.weight",
         r"decoder\.embed_tokens\.weight",
         r"lm_head\.weight",
+        r"classifier\.weight",
+        r"classifier\.bias",
     ]
     _keys_to_ignore_on_load_unexpected = [
         r"decoder\.block\.0\.layer\.1\.EncDecAttention\.relative_attention_bias\.weight",
+        r"lm_head\.weight",
     ]
 
     def __init__(self, config):

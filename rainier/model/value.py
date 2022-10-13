@@ -8,11 +8,16 @@ class Value:
 
     def __init__(self,
                  model_type,
+                 model_ckpt,
                  device,
                  device_map,
                 ):
         self.tokenizer = T5Tokenizer.from_pretrained(model_type)
         self.model = T5ForTokenRegression.from_pretrained(model_type)
+        if model_ckpt is not None:
+            checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
+            self.model.load_state_dict(checkpoint, strict=False)
+            checkpoint.clear()
         self.model = self.model.to(device)
         self.model.encoder.parallelize(device_map=device_map)
         self.model.decoder.parallelize(device_map=device_map)
