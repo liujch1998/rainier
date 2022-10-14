@@ -24,6 +24,8 @@ def get_args():
     parser.add_argument(
         '--use_model_ckpt_for_value', action='store_true', default=False)
     parser.add_argument(
+        '--policy_value_sharing', action='store_true', default=False)
+    parser.add_argument(
         '--qa_model_type', type=str, default='allenai/unifiedqa-t5-large', help='model used for QA')
     parser.add_argument(
         '--qa_model_ckpt', type=str, default=None, help='model ckpt used for QA')

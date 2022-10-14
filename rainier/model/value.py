@@ -11,8 +11,15 @@ class Value:
                  model_ckpt,
                  device,
                  device_map,
+                 model=None,
                 ):
         self.tokenizer = T5Tokenizer.from_pretrained(model_type)
+
+        if model is not None:
+            self.model = model
+            self.device = device
+            return
+
         self.model = T5ForTokenRegression.from_pretrained(model_type)
         if model_ckpt is not None:
             checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
@@ -47,6 +54,6 @@ class Value:
             output_hidden_states=False,
         )
         return {
-            'response/value': mask_pad(outputs.logits, response_mask)
+            'response/value': mask_pad(outputs['cls_logits'], response_mask)
         }
 
