@@ -15,5 +15,7 @@ echo "--------------------"
 source "$CONDA_PREFIX/../../etc/profile.d/conda.sh"
 conda activate rainier
 cd /gscratch/xlab/liujc/rainier/rainier
-python main.py --mode train --eval_baseline --use_model_ckpt_for_value
+python main.py --mode train \
+    --gain 3.575475037847048 --bias 0.032954977862281395 \
+    --use_model_ckpt_for_value
 

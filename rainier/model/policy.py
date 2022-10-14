@@ -25,7 +25,7 @@ class Policy:
             self.model = T5ForConditionalGeneration.from_pretrained(model_type)
         if model_ckpt is not None:
             checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
-            self.model.load_state_dict(checkpoint)
+            self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
         self.model.to(device)
         if device != 'cpu':
@@ -98,7 +98,7 @@ class Policy:
             output_hidden_states=False,
         )
 
-        response_logits = outputs['logits'] # (B, RL, V)
+        response_logits = outputs.logits # (B, RL, V)
         logprobs = F.log_softmax(response_logits, dim=-1)
         response_logprobs = torch.gather(logprobs, 2, response_input_ids[:, :, None]).squeeze(2) # (B, RL)
         response_entropy = logits_to_entropy(response_logits) # (B, RL)

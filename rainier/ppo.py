@@ -179,6 +179,8 @@ class PPOTrainer:
     def eval(self, step): # step=-1 for baseline
         if step != -1 and step % self.args.eval_interval != 0:
             return
+        if step == 0 and not self.args.eval_baseline:
+            return
         self.log.info(f'Evaluating [ppo_step {step}] ...')
 
         corrects = []

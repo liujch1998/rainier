@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import MSELoss
 from transformers.models.t5.modeling_t5 import T5PreTrainedModel, T5Stack, T5ForConditionalGeneration
-from transformers.modeling_outputs import TokenClassifierOutput
+from transformers.modeling_outputs import TokenClassifierOutput, BaseModelOutput
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from utils.utils import reduce_mean
 import copy
@@ -48,7 +48,7 @@ class T5ForTokenRegression(T5PreTrainedModel):
         self.model_parallel = False
         self.device_map = None
 
-    def forward(
+    def forward_cls(
         self,
         input_ids=None,
         attention_mask=None,
@@ -150,21 +150,23 @@ class T5ForTokenRegression(T5PreTrainedModel):
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
-        cls_logits = self.classifier(sequence_output).squeeze(-1)
+        logits = self.classifier(sequence_output).squeeze(-1)
 
-        cls_loss = None
+        loss = None
         if labels is not None:
             loss_fct = MSELoss(reduction='none')
-            cls_loss = loss_fct(cls_logits, labels)
+            loss = loss_fct(logits, labels)
 
         if not return_dict:
-            output = (cls_logits,) + decoder_outputs[1:] + encoder_outputs
-            return ((cls_loss,) + output) if cls_loss is not None else output
+            output = (logits,) + decoder_outputs[1:] + encoder_outputs
+            return ((loss,) + output) if loss is not None else output
 
-        return {
-            'cls_loss': loss,
-            'cls_logits': logits,
-        }
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=decoder_outputs.hidden_states,
+            attentions=decoder_outputs.attentions,
+        )
 
 
 class T5ForConditionalGenerationAndTokenRegression(T5ForConditionalGeneration):
@@ -208,7 +210,7 @@ class T5ForConditionalGenerationAndTokenRegression(T5ForConditionalGeneration):
         self.model_parallel = False
         self.device_map = None
 
-    def forward(
+    def forward_cls(
         self,
         input_ids=None,
         attention_mask=None,
@@ -310,21 +312,21 @@ class T5ForConditionalGenerationAndTokenRegression(T5ForConditionalGeneration):
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
             sequence_output = sequence_output * (self.model_dim**-0.5)
 
-        lm_logits = self.lm_head(sequence_output)
-        cls_logits = self.classifier(sequence_output).squeeze(-1)
+        logits = self.classifier(sequence_output).squeeze(-1)
 
-        cls_loss = None
+        loss = None
         if labels is not None:
             loss_fct = MSELoss(reduction='none')
-            cls_loss = loss_fct(cls_logits, labels)
+            loss = loss_fct(logits, labels)
 
         if not return_dict:
-            output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
-            return ((cls_loss,) + output) if cls_loss is not None else output
+            output = (logits,) + decoder_outputs[1:] + encoder_outputs
+            return ((loss,) + output) if loss is not None else output
 
-        return {
-            'cls_loss': cls_loss,
-            'cls_logits': cls_logits,
-            'logits': lm_logits,
-        }
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=decoder_outputs.hidden_states,
+            attentions=decoder_outputs.attentions,
+        )
 

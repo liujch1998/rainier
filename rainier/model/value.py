@@ -45,7 +45,7 @@ class Value:
         response_input_ids = response_input_ids.to(self.device)
         response_mask = response_mask.to(self.device)
 
-        outputs = self.model(
+        outputs = self.model.forward_cls(
             input_ids=query_input_ids,
             attention_mask=query_mask,
             labels=mask_pad(response_input_ids, response_mask, -100),
@@ -54,6 +54,6 @@ class Value:
             output_hidden_states=False,
         )
         return {
-            'response/value': mask_pad(outputs['cls_logits'], response_mask)
+            'response/value': mask_pad(outputs.logits, response_mask)
         }
 
