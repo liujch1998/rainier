@@ -3,6 +3,7 @@ from typing import Union, List, Dict
 import torch
 import torch.nn.functional as F
 from transformers import T5ForConditionalGeneration, T5Tokenizer
+from model.t5 import T5ForConditionalGenerationAndTokenRegression
 from utils.utils import logits_to_entropy, mask_pad
 
 
@@ -11,21 +12,26 @@ class Policy:
     def __init__(self,
                  model_type: str,
                  model_ckpt: str,
+                 policy_value_sharing: bool,
                  max_input_len: int,
                  max_output_len: int,
                  device,
                  device_map = None,
                 ):
         self.tokenizer = T5Tokenizer.from_pretrained(model_type)
-        self.model = T5ForConditionalGeneration.from_pretrained(model_type)
+        if policy_value_sharing:
+            self.model = T5ForConditionalGenerationAndTokenRegression.from_pretrained(model_type)
+        else:
+            self.model = T5ForConditionalGeneration.from_pretrained(model_type)
         if model_ckpt is not None:
             checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
-            self.model.load_state_dict(checkpoint)
+            self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
         self.model.to(device)
         if device != 'cpu':
             self.model.parallelize(device_map=device_map)
 
+        self.policy_value_sharing = policy_value_sharing
         self.max_input_len = max_input_len
         self.max_output_len = max_output_len
         self.device = device

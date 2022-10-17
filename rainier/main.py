@@ -139,6 +139,7 @@ def main():
         ref_policy = Policy(
             model_type=args.model_type,
             model_ckpt=args.model_ckpt,
+            policy_value_sharing=args.policy_value_sharing,
             max_input_len=args.max_input_len,
             max_output_len=args.max_output_len,
             device=devices[0],
@@ -147,6 +148,7 @@ def main():
         policy = Policy(
             model_type=args.model_type,
             model_ckpt=args.model_ckpt,
+            policy_value_sharing=args.policy_value_sharing,
             max_input_len=args.max_input_len,
             max_output_len=args.max_output_len,
             device=devices[0],
@@ -155,6 +157,8 @@ def main():
         # TODO: Try initializing this with model_ckpt as well
         value = Value(
             model_type=args.model_type,
+            model_ckpt=args.model_ckpt if args.use_model_ckpt_for_value else None,
+            model=policy.model if args.policy_value_sharing else None,
             device=devices[0],
             device_map=device_map,
         )
@@ -169,7 +173,7 @@ def main():
             device=devices[0],
         )
 
-        optimizer = torch.optim.Adam(itertools.chain(policy.model.parameters(), value.model.parameters()), lr=args.lr, eps=1e-5)
+        optimizer = torch.optim.Adam(policy.model.parameters() if args.policy_value_sharing else itertools.chain(policy.model.parameters(), value.model.parameters()), lr=args.lr, eps=1e-5)
         args.total_steps = ceil_div(args.total_episodes, args.batch_size)
         warmup_steps = math.ceil(args.num_warmup_step_ratio * args.total_steps)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=args.total_steps)
@@ -193,6 +197,7 @@ def main():
         policy = Policy(
             model_type=args.model_type,
             model_ckpt=args.model_ckpt,
+            policy_value_sharing=args.policy_value_sharing,
             max_input_len=args.max_input_len,
             max_output_len=args.max_output_len,
             device_map=device_map,

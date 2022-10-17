@@ -22,6 +22,10 @@ def get_args():
     parser.add_argument(
         '--model_ckpt', type=str, default='../model/rainier-large_stageI.pth', help='model ckpt used for policy and ref policy (NOT value!)')
     parser.add_argument(
+        '--use_model_ckpt_for_value', action='store_true', default=False)
+    parser.add_argument(
+        '--policy_value_sharing', action='store_true', default=False)
+    parser.add_argument(
         '--qa_model_type', type=str, default='allenai/unifiedqa-t5-large', help='model used for QA')
     parser.add_argument(
         '--qa_model_ckpt', type=str, default=None, help='model ckpt used for QA')
@@ -45,6 +49,8 @@ def get_args():
         '--bias', type=float, default=None, help='precomputed normalization factor for reward')
 
     # ppo
+    parser.add_argument(
+        '--pg_coef', type=float, default=1.0, help='policy loss coefficient')
     parser.add_argument(
         '--vf_coef', type=float, default=1.0, help='value loss coefficient')
     parser.add_argument(

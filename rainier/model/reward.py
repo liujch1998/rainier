@@ -293,8 +293,8 @@ class Reward:
         with open(os.path.join(reward_dir, 'reward_normalization.json'), 'w') as f:
             json.dump(reward_dict, f, indent=4)
 
-    def read_reward_norm(reward_dir):
-        with open(os.path.json(reward_dir, 'reward_normalization.json')) as f:
+    def read_reward_norm(self, reward_dir):
+        with open(os.path.join(reward_dir, 'reward_normalization.json')) as f:
             reward_dict = json.load(f)
         self.gain = reward_dict['gain']
         self.bias = reward_dict['bias']
