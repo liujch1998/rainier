@@ -5,7 +5,6 @@ import torch
 from torch.utils.data import IterableDataset, Dataset, DataLoader
 import pytorch_lightning as pl
 import transformers
-from data import datapath_by_task_and_split
 device = torch.device('cuda')
 pl.seed_everything(19260817)
 
@@ -48,12 +47,12 @@ class Ds(Dataset):
 
     def collate_fn(self, batch):
         sources = [item['source'] for item in batch]
-        sources = self.tokenizer(sources, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_length)
+        sources = self.tokenizer(sources, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len)
         input_ids = sources.input_ids
         attention_mask = sources.attention_mask
 
         targets = [item['target'] for item in batch]
-        targets = self.tokenizer(targets, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=64)
+        targets = self.tokenizer(targets, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_output_len)
         labels = targets.input_ids
         labels[targets.attention_mask == 0] = -100
 
@@ -76,7 +75,7 @@ class GenDs(Dataset):
 
     def collate_fn(cls, batch):
         sources = [item['source'] for item in batch]
-        sources = self.tokenizer(sources, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_length)
+        sources = self.tokenizer(sources, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len)
         input_ids = sources.input_ids
         attention_mask = sources.attention_mask
 
@@ -132,9 +131,11 @@ def main():
     parser.add_argument('--model-type', type=str, default='t5-large')
     parser.add_argument('--expr-path', default='../runs/imitation/')
     parser.add_argument('--ckpt-path', default=None)
-    parser.add_argument('--max-length', type=int, default=256)
+    parser.add_argument('--max-input-len', type=int, default=256)
+    parser.add_argument('--max-output-len', type=int, default=64)
 
     # train
+    parser.add_argument('--train-tasks', type=str, default='obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg')
     parser.add_argument('--max-steps', type=int, default=100000)
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-5)
@@ -148,7 +149,7 @@ def main():
 
     args = parser.parse_args()
 
-    tasks = datapath_by_task_and_split.keys()
+    tasks = args.train_tasks.split(',')
     args.train_paths = [f'../data/knowledge/knowledge_gkp_gpt3curie.train.{task}.json' for task in tasks]
     args.valid_paths = [f'../data/knowledge/knowledge_gkp_gpt3curie.dev.{task}.json' for task in tasks]
 

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from typing import TypeVar, Iterable, List, Union, Any
+import random
 import numpy as np
 import torch
 from tqdm.auto import tqdm
@@ -98,11 +99,15 @@ def batchify(data: Iterable[T], batch_size: int) -> Iterable[List[T]]:
         yield batch
 
 
-def set_seed(seed, n_gpu):
+def set_seed(seed=19260817, cuda_deterministic=True):
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if n_gpu > 0:
-        torch.cuda.manual_seed_all(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available() and cuda_deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def load_jsonl(file: Union[str, Path]) -> Iterable[Any]:
