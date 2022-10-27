@@ -102,12 +102,12 @@ class Trainer:
         self.save(step=step)
         self.eval(step=step)
 
-        self.optimizer.step()
+        self.optimizer.zero_grad()
         for _ in range(self.args.accumulate_grad_batches):
             batch = next(self.train_sampler)
             loss = self.loss(batch)
             loss.backward()
-        self.optimizer.zero_grad()
+        self.optimizer.step()
 
         if step % self.args.log_interval == 0:
             self.writer.add_scalar('train/loss', loss.item(), step)
@@ -180,23 +180,30 @@ def main():
         devices[0] = torch.device('cpu')
 
     device_map = None
-    if num_gpus == 8:  # 8x V100
+    if num_gpus == 4:  # 4x V100 for T5-large
+        device_map = {
+            0: [0],
+            1: [1, 2, 3, 4, 5, 6, 7],
+            2: [8, 9, 10, 11, 12, 13, 14, 15],
+            3: [16, 17, 18, 19, 20, 21, 22, 23],
+        }
+    elif num_gpus == 8:  # 8x V100 for T5-3b
         device_map = {
             0: [0],
             1: [1, 2, 3],
             2: [4, 5, 6],
             3: [7, 8, 9],
-            4: [10, 11 ,12],
+            4: [10, 11, 12],
             5: [13, 14, 15],
             6: [16, 17, 18, 19],
             7: [20, 21, 22, 23],
         }
     else:
-        log.error('Invalid number of GPUs! Please use 8')
+        log.error('Invalid number of GPUs!')
         exit(-1)
 
     # Set up save directories
-    args.output_dir = '../runs/imitation/'
+    args.output_dir = '../runs_stageI/'
     if args.load_from_ckpt is not None:
         args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
     else:
