@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import IterableDataset, Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import transformers
+import wandb
 
 from utils.utils import ensure_dir, set_seed
 
@@ -70,7 +71,9 @@ class Trainer:
         self.optimizer = optimizer
         self.device = device
         if not args.nosave:
-            self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
+            # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
+            wandb.init(project='rainier_stageI', name=args.run_name, config=args)
+            wandb.define_metric('eval/loss', summary='min')
 
         self.train_sampler = iter(self.train_dataloader)
         for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_dataloader)):
@@ -114,7 +117,8 @@ class Trainer:
 
         if not self.args.nosave:
             if step % self.args.log_interval == 0:
-                self.writer.add_scalar('train/loss', loss.item(), step)
+                # self.writer.add_scalar('train/loss', loss.item(), step)
+                wandb.log({'train/loss': loss.item(), 'train/step': step})
 
     def eval(self, step):
         if step % self.args.eval_interval != 0:
@@ -134,7 +138,8 @@ class Trainer:
         if self.args.nosave:
             self.eval_losses[step] = loss
         else:
-            self.writer.add_scalar('eval/loss', loss, step)
+            # self.writer.add_scalar('eval/loss', loss, step)
+            wandb.log({'eval/loss': loss.item(), 'eval/step': step})
 
             prev_best_step = None if len(self.eval_losses) == 0 else min(self.eval_losses, key=self.eval_losses.get)
             self.eval_losses[step] = loss
@@ -236,7 +241,8 @@ def main():
             time = datetime.now()
             date_time = time.strftime('%b%d_%H-%M-%S')
             import socket
-            args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname())
+            args.run_name = date_time + '_' + socket.gethostname()
+            args.save_dir = os.path.join(args.output_dir, args.run_name)
         args.model_dir = os.path.join(args.save_dir, 'model')
         args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
         for d in [args.save_dir, args.model_dir, args.tensorboard_dir]:

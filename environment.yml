@@ -16,3 +16,4 @@ dependencies:
   - tqdm
   - tensorboard
   - gdown
+  - wandb
