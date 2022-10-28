@@ -4,6 +4,7 @@ import json
 import logging
 import numpy as np
 import os
+import random
 from tqdm import tqdm
 
 import torch
@@ -17,34 +18,26 @@ logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'))
 log = logging.getLogger(__name__)
 
 
-def init_ds(paths, split):
-    ds = []
-    for path in paths:
-        with open(path) as f:
-            js = json.load(f)
-        for item in js:
-            for k in range(len(item['knowledges'])):
-                ds.append({'source': item['query'], 'target': item['knowledges'][k]})
-                # for evaluation, only keep the first knowledge for sake of speed
-                if split == 'eval':
-                    break
-    print(f'{split} set size = {len(ds)}')
-    return ds
-
-class IterDs(IterableDataset):
-    def __init__(self, train_paths):
-        super().__init__()
-        self.ds = init_ds(train_paths, 'train')
-
-    def __iter__(self):
-        while True:
-            i = np.random.randint(0, len(self.ds)-1)
-            yield self.ds[i]
-
 class Ds(Dataset):
-    def __init__(self, eval_paths):
+    def __init__(self, paths, split):
         super().__init__()
-        self.ds = init_ds(eval_paths, 'eval')
+        self.ds = self.init_ds(paths, split)
+
+    def init_ds(self, paths, split):
+        ds = []
+        for path in paths:
+            with open(path) as f:
+                js = json.load(f)
+            for item in js:
+                for k in range(len(item['knowledges'])):
+                    ds.append({'source': item['query'], 'target': item['knowledges'][k]})
+                    # for evaluation, only keep the first knowledge for sake of speed
+                    if split == 'eval':
+                        break
+        if split == 'train':
+            random.shuffle(ds)
+        print(f'{split} set size = {len(ds)}')
+        return ds
 
     def __len__(self):
         return len(self.ds)
@@ -64,9 +57,9 @@ class Trainer:
                  tokenizer,
                  model,
                  optimizer,
+                 init_step,
+                 eval_losses,
                  device,
-                 log,
-                 log_dir,
                 ):
         self.args = args
         self.train_dataloader = train_dataloader
@@ -76,9 +69,14 @@ class Trainer:
         self.model = model
         self.optimizer = optimizer
         self.device = device
-        self.log = log
-        self.log_dir = log_dir
-        self.writer = SummaryWriter(log_dir=self.log_dir)
+        if not args.nosave:
+            self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
+
+        self.train_sampler = iter(self.train_dataloader)
+        for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_dataloader)):
+            next(self.train_sampler)
+
+        self.eval_losses = eval_losses
 
     def loss(self, batch):
         source_tok = self.tokenizer.batch_encode_plus(
@@ -99,25 +97,31 @@ class Trainer:
         return loss
 
     def train(self, step):
-        self.save(step=step)
         self.eval(step=step)
+        self.save(step=step)
 
+        self.model.train()
         self.optimizer.zero_grad()
         for _ in range(self.args.accumulate_grad_batches):
-            batch = next(self.train_sampler)
+            try:
+                batch = next(self.train_sampler)
+            except StopIteration:
+                self.train_sampler = iter(self.train_dataloader)
+                batch = next(self.train_sampler)
             loss = self.loss(batch)
             loss.backward()
         self.optimizer.step()
 
-        if step % self.args.log_interval == 0:
-            self.writer.add_scalar('train/loss', loss.item(), step)
+        if not self.args.nosave:
+            if step % self.args.log_interval == 0:
+                self.writer.add_scalar('train/loss', loss.item(), step)
 
     def eval(self, step):
-        if step == 0:
-            return
         if step % self.args.eval_interval != 0:
             return
-        self.log.info(f'Evaluating [step {step}] ...')
+        if step in self.eval_losses:
+            return
+        log.info(f'Evaluating [step {step}] ...')
 
         losses = []
         for i, batch in enumerate(tqdm(self.eval_dataloader)):
@@ -125,17 +129,37 @@ class Trainer:
             with torch.no_grad():
                 loss = self.loss(batch)
             losses.append(loss.item())
-        self.writer.add_scalar('eval/loss', np.mean(losses), step)
+        loss = np.mean(losses)
 
-    def save(self, step):
+        if self.args.nosave:
+            self.eval_losses[step] = loss
+        else:
+            self.writer.add_scalar('eval/loss', loss, step)
+
+            prev_best_step = None if len(self.eval_losses) == 0 else min(self.eval_losses, key=self.eval_losses.get)
+            self.eval_losses[step] = loss
+            if prev_best_step is None or loss < self.eval_losses[prev_best_step]:
+                if prev_best_step is not None:
+                    try:
+                        os.remove(f'{self.args.model_dir}/ckp_{prev_best_step}.pth')
+                    except:
+                        log.warning(f'Cannot remove previous best ckpt!')
+                self.save(step, last=False)
+                log.info(f'Best ckpt updated to [step {step}]')
+
+    def save(self, step, last=True):
+        if self.args.nosave:
+            return
         if step % self.args.save_interval != 0:
             return
+        # this will overwrite an existing ckpt with the save filename!
         torch.save({
             'model': self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'step': step,
-        }, f'{self.args.model_dir}/ckp_{step}.pth')
-        self.log.info(f'[step {step}] model checkpoint saved')
+            'eval_losses': self.eval_losses,
+        }, f'{self.args.model_dir}/{"last" if last else "ckp_" + str(step)}.pth')
+        log.info(f'[step {step}] model checkpoint saved')
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -144,11 +168,11 @@ def get_args():
     parser.add_argument('--model_type', type=str, default='t5-large')
     parser.add_argument('--load_from_ckpt', default=None)
     parser.add_argument('--max_input_len', type=int, default=256)
-    parser.add_argument('--max_output_len', type=int, default=64)
+    parser.add_argument('--max_output_len', type=int, default=32)
 
     # train
     parser.add_argument('--train_tasks', type=str, default='obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg')
-    parser.add_argument('--total_steps', type=int, default=100000)
+    parser.add_argument('--total_steps', type=int, default=50000)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--accumulate_grad_batches', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-5)
@@ -160,6 +184,7 @@ def get_args():
         '--save_interval', type=int, default=1000, help='step interval to save model checkpoints')
     parser.add_argument(
         '--eval_interval', type=int, default=1000, help='step interval to do evaluation')
+    parser.add_argument('--nosave', default=False, action='store_true')
 
     args = parser.parse_args()
     return args
@@ -203,32 +228,34 @@ def main():
         exit(-1)
 
     # Set up save directories
-    args.output_dir = '../runs_stageI/'
-    if args.load_from_ckpt is not None:
-        args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
-    else:
-        time = datetime.now()
-        date_time = time.strftime('%b%d_%H-%M-%S')
-        import socket
-        args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname())
-    args.model_dir = os.path.join(args.save_dir, 'model')
-    args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
-    for d in [args.save_dir, args.model_dir, args.tensorboard_dir]:
-        ensure_dir(d)
-
-    log.info(f'Write to output directory: {args.save_dir}')
-    with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
-        json.dump(args.__dict__, f, indent=2)
+    if not args.nosave:
+        args.output_dir = '../runs_stageI/'
+        if args.load_from_ckpt is not None:
+            args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
+        else:
+            time = datetime.now()
+            date_time = time.strftime('%b%d_%H-%M-%S')
+            import socket
+            args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname())
+        args.model_dir = os.path.join(args.save_dir, 'model')
+        args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
+        for d in [args.save_dir, args.model_dir, args.tensorboard_dir]:
+            ensure_dir(d)
+    
+        log.info(f'Write to output directory: {args.save_dir}')
+        with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
+            json.dump(args.__dict__, f, indent=2)
 
     # Load data
     log.info(f'Loading data ...')
     tasks = args.train_tasks.split(',')
     train_paths = [f'../data/knowledge/knowledge_gkp_gpt3curie.train.{task}.json' for task in tasks]
     eval_paths = [f'../data/knowledge/knowledge_gkp_gpt3curie.dev.{task}.json' for task in tasks]
-    train_dataset = IterDs(train_paths)
-    eval_dataset = Ds(eval_paths)
-    train_dataloader = DataLoader(train_dataset, collate_fn=Ds.collate_fn, batch_size=args.batch_size, num_workers=8)
-    eval_dataloader = DataLoader(eval_dataset, collate_fn=Ds.collate_fn, batch_size=args.batch_size, num_workers=8)
+    train_dataset = Ds(train_paths, 'train')
+    eval_dataset = Ds(eval_paths, 'eval')
+    # train ds is shuffled in its constructor
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=Ds.collate_fn)
+    eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=Ds.collate_fn)
 
     # Initialize models and optimizer
     log.info(f'Initializing models ...')
@@ -237,14 +264,16 @@ def main():
     model.to(devices[0])
     model.parallelize(device_map=device_map)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    step = 0
+    init_step = 0
+    eval_losses = {}
 
     # Load from checkpoint if continue training
     if args.load_from_ckpt is not None:
         checkpoint = torch.load(args.load_from_ckpt)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
-        step = checkpoint['step']
+        init_step = checkpoint['step']
+        eval_losses = checkpoint['eval_losses']
         checkpoint.clear()
 
     # Set up trainer
@@ -255,13 +284,13 @@ def main():
         tokenizer=tokenizer,
         model=model,
         optimizer=optimizer,
+        init_step=init_step,
+        eval_losses=eval_losses,
         device=devices[0],
-        log=log,
-        log_dir=args.tensorboard_dir,
     )
 
     # Train
-    pbar = tqdm(list(range(step, args.total_steps)))
+    pbar = tqdm(list(range(init_step, args.total_steps)))
     for step in pbar:
         trainer.train(step)
 
