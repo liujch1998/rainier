@@ -78,11 +78,13 @@ def main():
             args.output_dir = '../runs'
             if args.load_from_ckpt is not None:
                 args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
+                args.run_name = args.save_dir.split('/')[-1]
             else:
                 time = datetime.now()
                 date_time = time.strftime('%b%d_%H-%M-%S')
                 import socket
-                args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname())
+                args.run_name = date_time + '_' + socket.gethostname()
+                args.save_dir = os.path.join(args.output_dir, args.run_name)
             args.reward_dir = os.path.join(args.save_dir, 'reward')
             args.model_dir = os.path.join(args.save_dir, 'model')
             args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
@@ -102,6 +104,7 @@ def main():
             else:
                 log.error('You must provide either --ckpt or --load_from_ckpt!')
                 exit(-1)
+            args.run_name = args.save_dir.split('/')[-1]
             args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
             args.knowledge_dir = os.path.join(args.save_dir, 'knowledge')
             args.inference_dir = os.path.join(args.save_dir, 'inference')

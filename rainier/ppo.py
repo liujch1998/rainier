@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+import wandb
 from utils.utils import whiten, reduce_mean, reduce_sum, clamp
 from model.policy import Policy
 from model.value import Value
@@ -46,7 +47,9 @@ class PPOTrainer:
 
         self.log = log
         if not args.nosave:
-            self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
+            # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
+            wandb.init(project='rainier_stageII', name=args.run_name, config=args)
+            wandb.define_metric('eval/acc_unweighted', summary='max')
 
         if self.train_dataloader is not None:
             self.train_sampler = iter(self.train_dataloader)
@@ -124,8 +127,8 @@ class PPOTrainer:
                 text=batch['question'],
                 temperature=self.args.temperature,
             )
-        if not self.args.nosave:
-            self.writer.add_text('Question-Knowledge', f'{results["query/text"][0]} ==> {results["response/text"][0]}', global_step=step)
+        # if not self.args.nosave:
+        #     self.writer.add_text('Question-Knowledge', f'{results["query/text"][0]} ==> {results["response/text"][0]}', global_step=step)
 
         forward_inputs = {'query_input_ids': results['query/input_ids'],
                           'query_mask': results['query/mask'],
@@ -172,8 +175,9 @@ class PPOTrainer:
         self.scheduler.step()
 
         # Logging
-        if not self.args.nosave:
+        if not self.args.nosave and step % self.args.log_interval == 0:
             stats = {
+                'train/step': step,
                 'train/acc': np.mean(results['corrects']),
                 'train/loss/total': results['loss/total'].item(),
                 'train/loss/policy': results['loss/policy'].item(),
@@ -183,8 +187,9 @@ class PPOTrainer:
                 'train/reward/normalized': np.mean(results['rewards/normalized']),
                 'train/reward/raw': np.mean(results['rewards/raw']),
             }
-            for k, v in stats.items():
-                self.writer.add_scalar(k, v, step)
+            wandb.log(stats)
+            # for k, v in stats.items():
+            #     self.writer.add_scalar(k, v, step)
 
     def valid(self, step): # step=-1 for baseline
         if step != -1 and step % self.args.eval_interval != 0:
@@ -195,10 +200,11 @@ class PPOTrainer:
 
         corrects = []
         corrects_by_task = defaultdict(list)
+        results_table = wandb.Table(columns=['step', 'id', 'task', 'question', 'knowledge', 'pred', 'answer_ix', 'correct'])
 
         for i, batch in enumerate(tqdm(self.eval_dataloader)):
             with torch.no_grad():
-                knowledges = []
+                knowledges = None
                 # If not baseline, generate knowledge
                 if step != -1:
                     rollouts = self.policy_model.sample(
@@ -220,6 +226,8 @@ class PPOTrainer:
             for task, c in zip(batch['task'], results['corrects']):
                 corrects_by_task[task].append(c)
 
+            results_table.add_data(step, i, batch['task'][0], batch['question'][0], '' if knowledges is None else knowledges[0], results['preds'][0], batch['answer_ix'][0], results['corrects'][0])
+
         acc_weighted = np.mean(corrects)
         acc_by_task = {k: np.mean(v) for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
@@ -232,10 +240,19 @@ class PPOTrainer:
         if self.args.nosave:
             self.eval_accs[step] = acc_unweighted
         else:
-            self.writer.add_scalar('eval/acc_weighted', acc_weighted, step)
-            self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
+            # self.writer.add_scalar('eval/acc_weighted', acc_weighted, step)
+            # self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
+            # for task, acc in acc_by_task.items():
+            #     self.writer.add_scalar(f'eval/acc/{task}', acc, step)
+            stats = {
+                'eval/step': step,
+                'eval/results_table': results_table,
+                'eval/acc_weighted': acc_weighted,
+                'eval/acc_unweighted': acc_unweighted,
+            }
             for task, acc in acc_by_task.items():
-                self.writer.add_scalar(f'eval/acc/{task}', acc, step)
+                stats[f'eval/acc/{task}'] = acc
+            wandb.log(stats)
 
             prev_best_step = None if len(self.eval_accs) == 0 else max(self.eval_accs, key=self.eval_accs.get)
             self.eval_accs[step] = acc_unweighted
@@ -309,17 +326,25 @@ class PPOTrainer:
         for task, acc in acc_by_task.items():
             self.log.info(f'\t{task} = {acc:.4f}')
 
-            self.writer.add_scalar('eval/acc_weighted', acc_weighted, step)
-            self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
-            for task, acc in acc_by_task.items():
-                self.writer.add_scalar(f'eval/acc/{task}', acc, step)
+        # self.writer.add_scalar('eval/acc_weighted', acc_weighted, step)
+        # self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
+        # for task, acc in acc_by_task.items():
+        #     self.writer.add_scalar(f'eval/acc/{task}', acc, step)
+        stats = {
+            'eval/step': step,
+            'eval/acc_weighted': acc_weighted,
+            'eval/acc_unweighted': acc_unweighted,
+        }
+        for task, acc in acc_by_task.items():
+            stats[f'eval/acc/{task}'] = acc
+        wandb.log(stats)
 
-            knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
-            inference_path = os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
-            with open(knowledge_path, 'w') as f:
-                json.dump(knowledge_outputs, f, indent=4)
-            with open(inference_path, 'w') as f:
-                json.dump(inference_outputs, f, indent=4)
+        knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
+        inference_path = os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
+        with open(knowledge_path, 'w') as f:
+            json.dump(knowledge_outputs, f, indent=4)
+        with open(inference_path, 'w') as f:
+            json.dump(inference_outputs, f, indent=4)
 
     """
     Internally set bias and gain terms based on the data from the dataloader

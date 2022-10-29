@@ -94,7 +94,7 @@ def get_args():
     parser.add_argument(
         '--seed', type=int, default=1, help='random seed (default: 1)')
     parser.add_argument(
-        '--log_interval', type=int, default=100, help='step interval to print out logs')
+        '--log_interval', type=int, default=1, help='step interval to print out logs')
     parser.add_argument(
         '--save_interval', type=int, default=500, help='step interval to save model checkpoints')
     parser.add_argument(
