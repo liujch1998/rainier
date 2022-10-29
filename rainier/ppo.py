@@ -6,6 +6,7 @@ import argparse
 import itertools
 from tqdm import tqdm
 import logging
+from typing import Dict
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -28,8 +29,9 @@ class PPOTrainer:
                  reward_model: Reward,
                  optimizer: torch.optim.Optimizer,
                  scheduler: torch.optim.lr_scheduler.LambdaLR,
+                 init_step: int,
+                 eval_accs: Dict,
                  log: logging.Logger,
-                 log_dir: str,
                 ):
         self.args = args
         self.train_dataloader = train_dataloader
@@ -43,8 +45,15 @@ class PPOTrainer:
         self.scheduler = scheduler
 
         self.log = log
-        self.log_dir = log_dir
-        self.writer = SummaryWriter(log_dir=self.log_dir)
+        if not args.nosave:
+            self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
+
+        if self.train_dataloader is not None:
+            self.train_sampler = iter(self.train_dataloader)
+            for _ in range(init_step % len(self.train_dataloader)):
+                next(self.train_sampler)
+
+        self.eval_accs = eval_accs
 
     def loss(self, results):
         old_values = results['response/value']
@@ -99,14 +108,13 @@ class PPOTrainer:
         results['loss/policy'] = pg_loss
         results['loss/value'] = vf_loss
 
-    def train(self, step_num):
-        self.save(step=step_num)
-        self.eval(step=step_num)
+    def train(self, step):
+        self.valid(step)
+        self.save(step)
 
         try:
             batch = next(self.train_sampler)
-            assert len(batch['question']) == self.args.batch_size, 'insufficient batch'
-        except (StopIteration, AssertionError):
+        except StopIteration:
             self.train_sampler = iter(self.train_dataloader)
             batch = next(self.train_sampler)
 
@@ -116,7 +124,8 @@ class PPOTrainer:
                 text=batch['question'],
                 temperature=self.args.temperature,
             )
-        self.writer.add_text('Question-Knowledge', f'{results["query/text"][0]} ==> {results["response/text"][0]}', global_step=step_num)
+        if not self.args.nosave:
+            self.writer.add_text('Question-Knowledge', f'{results["query/text"][0]} ==> {results["response/text"][0]}', global_step=step)
 
         forward_inputs = {'query_input_ids': results['query/input_ids'],
                           'query_mask': results['query/mask'],
@@ -163,24 +172,83 @@ class PPOTrainer:
         self.scheduler.step()
 
         # Logging
-        stats = {
-            'train/acc': np.mean(results['corrects']),
-            'train/loss/total': results['loss/total'].item(),
-            'train/loss/policy': results['loss/policy'].item(),
-            'train/loss/value': results['loss/value'].item(),
-            'train/reward/penalized': torch.mean(reduce_sum(results['rewards/penalized'], results['response/mask'], axis=1)).item(),
-            'train/reward/KL': torch.mean(reduce_sum(results['rewards/kl'], results['response/mask'], axis=1)).item(),
-            'train/reward/normalized': np.mean(results['rewards/normalized']),
-            'train/reward/raw': np.mean(results['rewards/raw']),
-        }
-        for k, v in stats.items():
-            self.writer.add_scalar(k, v, step_num)
+        if not self.args.nosave:
+            stats = {
+                'train/acc': np.mean(results['corrects']),
+                'train/loss/total': results['loss/total'].item(),
+                'train/loss/policy': results['loss/policy'].item(),
+                'train/loss/value': results['loss/value'].item(),
+                'train/reward/penalized': torch.mean(reduce_sum(results['rewards/penalized'], results['response/mask'], axis=1)).item(),
+                'train/reward/KL': torch.mean(reduce_sum(results['rewards/kl'], results['response/mask'], axis=1)).item(),
+                'train/reward/normalized': np.mean(results['rewards/normalized']),
+                'train/reward/raw': np.mean(results['rewards/raw']),
+            }
+            for k, v in stats.items():
+                self.writer.add_scalar(k, v, step)
 
-    def eval(self, step): # step=-1 for baseline
+    def valid(self, step): # step=-1 for baseline
         if step != -1 and step % self.args.eval_interval != 0:
             return
-        if step == 0 and not self.args.eval_baseline:
+        if step in self.eval_accs:
             return
+        self.log.info(f'Evaluating [ppo_step {step}] ...')
+
+        corrects = []
+        corrects_by_task = defaultdict(list)
+
+        for i, batch in enumerate(tqdm(self.eval_dataloader)):
+            with torch.no_grad():
+                knowledges = []
+                # If not baseline, generate knowledge
+                if step != -1:
+                    rollouts = self.policy_model.sample(
+                        text=batch['question'],
+                        top_p=0.0,
+                    )
+                    knowledges = rollouts['response/text']
+
+                results = self.reward_model.get_reward(
+                    questions=batch['question'],
+                    knowledges=knowledges,
+                    choicess=batch['choices'],
+                    answer_ixs=batch['answer_ix'], 
+                    override_bias=0,
+                    override_gain=1,
+                )
+
+            corrects += results['corrects']
+            for task, c in zip(batch['task'], results['corrects']):
+                corrects_by_task[task].append(c)
+
+        acc_weighted = np.mean(corrects)
+        acc_by_task = {k: np.mean(v) for k, v in corrects_by_task.items()}
+        acc_unweighted = np.mean(list(acc_by_task.values()))
+
+        self.log.info(f'Evaluated [ppo_step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
+        self.log.info('Accuracy by task:')
+        for task, acc in acc_by_task.items():
+            self.log.info(f'\t{task} = {acc:.4f}')
+
+        if self.args.nosave:
+            self.eval_accs[step] = acc_unweighted
+        else:
+            self.writer.add_scalar('eval/acc_weighted', acc_weighted, step)
+            self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
+            for task, acc in acc_by_task.items():
+                self.writer.add_scalar(f'eval/acc/{task}', acc, step)
+
+            prev_best_step = None if len(self.eval_accs) == 0 else max(self.eval_accs, key=self.eval_accs.get)
+            self.eval_accs[step] = acc_unweighted
+            if prev_best_step is None or acc_unweighted > self.eval_accs[prev_best_step]:
+                if prev_best_step is not None:
+                    try:
+                        os.remove(f'{self.args.model_dir}/ckp_{prev_best_step}.pth')
+                    except:
+                        self.log.warning(f'Cannot remove previous best ckpt!')
+                self.save(step, last=False)
+                self.log.info(f'Best ckpt updated to [step {step}]')
+
+    def eval(self, step):
         self.log.info(f'Evaluating [ppo_step {step}] ...')
 
         corrects = []
@@ -191,14 +259,12 @@ class PPOTrainer:
         for i, batch in enumerate(tqdm(self.eval_dataloader)):
             with torch.no_grad():
                 knowledgess = []
-                # If not baseline, generate knowledge
-                if step != -1:
-                    for j in range(self.args.num_samples):
-                        rollouts = self.policy_model.sample(
-                            text=batch['question'],
-                            top_p=self.args.top_p,
-                        )
-                        knowledgess.append(rollouts['response/text'])
+                for j in range(self.args.num_samples):
+                    rollouts = self.policy_model.sample(
+                        text=batch['question'],
+                        top_p=self.args.top_p,
+                    )
+                    knowledgess.append(rollouts['response/text'])
 
                 results = self.reward_model.get_reward_ensemble(
                     questions=batch['question'],
@@ -243,17 +309,17 @@ class PPOTrainer:
         for task, acc in acc_by_task.items():
             self.log.info(f'\t{task} = {acc:.4f}')
 
-        self.writer.add_scalar('eval/acc_weighted', acc_weighted, step)
-        self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
-        for task, acc in acc_by_task.items():
-            self.writer.add_scalar(f'eval/acc/{task}', acc, step)
+            self.writer.add_scalar('eval/acc_weighted', acc_weighted, step)
+            self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
+            for task, acc in acc_by_task.items():
+                self.writer.add_scalar(f'eval/acc/{task}', acc, step)
 
-        knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
-        inference_path = os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
-        with open(knowledge_path, 'w') as f:
-            json.dump(knowledge_outputs, f, indent=4)
-        with open(inference_path, 'w') as f:
-            json.dump(inference_outputs, f, indent=4)
+            knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
+            inference_path = os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
+            with open(knowledge_path, 'w') as f:
+                json.dump(knowledge_outputs, f, indent=4)
+            with open(inference_path, 'w') as f:
+                json.dump(inference_outputs, f, indent=4)
 
     """
     Internally set bias and gain terms based on the data from the dataloader
@@ -279,16 +345,19 @@ class PPOTrainer:
         self.reward_model.gain = new_std / old_std
         self.reward_model.bias = new_mean - self.reward_model.gain * old_mean
 
-    def save(self, step):
+    def save(self, step, last=True):
+        if self.args.nosave:
+            return
         if step % self.args.save_interval != 0:
             return
+        # this will overwrite an existing ckpt with the save filename!
         torch.save({
             'policy_model': self.policy_model.model.state_dict(),
             'value_model': self.value_model.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'scheduler': self.scheduler.state_dict(),
             'step': step,
-            'tensorboard_logdir': self.log_dir,
-        }, f'{self.args.model_dir}/ckp_{step}.pth')
+            'eval_accs': self.eval_accs,
+        }, f'{self.args.model_dir}/{"last" if last else "ckp_" + str(step)}.pth')
         self.log.info(f'[ppo_step {step}] model checkpoint saved')
 

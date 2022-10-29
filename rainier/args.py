@@ -100,6 +100,8 @@ def get_args():
     parser.add_argument(
         '--eval_interval', type=int, default=500, help='step interval to do evaluation')
     parser.add_argument(
+        '--nosave', default=False, action='store_true')
+    parser.add_argument(
         '--eval_baseline', action='store_true', help='whether to evaluate the no-knowledge baseline')
     parser.add_argument(
         '--cuda_deterministic', action='store_false', default=True,

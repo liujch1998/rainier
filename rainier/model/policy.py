@@ -27,6 +27,7 @@ class Policy:
             checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
             self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
+        self.model.eval()
         self.model.to(device)
         if device != 'cpu':
             self.model.parallelize(device_map=device_map)

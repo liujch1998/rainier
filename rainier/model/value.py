@@ -25,7 +25,8 @@ class Value:
             checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
             self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
-        self.model = self.model.to(device)
+        self.model.eval()
+        self.model.to(device)
         self.model.encoder.parallelize(device_map=device_map)
         self.model.decoder.parallelize(device_map=device_map)
         self.model.model_parallel = True

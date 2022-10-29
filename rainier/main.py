@@ -73,54 +73,56 @@ def main():
             }
 
     # Set up save directories
-    if args.mode == 'train':
-        args.output_dir = '../runs'
-        if args.load_from_ckpt is not None:
-            args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
-        else:
-            time = datetime.now()
-            date_time = time.strftime('%b%d_%H-%M-%S')
-            import socket
-            args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname())
-        args.reward_dir = os.path.join(args.save_dir, 'reward')
-        args.model_dir = os.path.join(args.save_dir, 'model')
-        args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
-        args.knowledge_dir = os.path.join(args.save_dir, 'knowledge')
-        args.inference_dir = os.path.join(args.save_dir, 'inference')
-        for d in [args.save_dir, args.reward_dir, args.model_dir, args.tensorboard_dir, args.knowledge_dir, args.inference_dir]:
-            ensure_dir(d)
+    if not args.nosave:
+        if args.mode == 'train':
+            args.output_dir = '../runs'
+            if args.load_from_ckpt is not None:
+                args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
+            else:
+                time = datetime.now()
+                date_time = time.strftime('%b%d_%H-%M-%S')
+                import socket
+                args.save_dir = os.path.join(args.output_dir, date_time + '_' + socket.gethostname())
+            args.reward_dir = os.path.join(args.save_dir, 'reward')
+            args.model_dir = os.path.join(args.save_dir, 'model')
+            args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
+            args.knowledge_dir = os.path.join(args.save_dir, 'knowledge')
+            args.inference_dir = os.path.join(args.save_dir, 'inference')
+            for d in [args.save_dir, args.reward_dir, args.model_dir, args.tensorboard_dir, args.knowledge_dir, args.inference_dir]:
+                ensure_dir(d)
 
-    elif args.mode == 'eval':
-        if args.load_from_ckpt is not None:
-            args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
-            args.save_dir = args.save_dir.replace('runs/', 'eval/')
-            ckp = args.load_from_ckpt.split('ckp_')[-1].strip('.pth')
-            args.save_dir += f'_ckp-{ckp}'
-        elif args.eval_ckpt is not None:
-            args.save_dir = os.path.dirname(args.eval_ckpt)
-        else:
-            log.error('You must provide either --ckpt or --load_from_ckpt!')
-            exit(-1)
-        args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
-        args.knowledge_dir = os.path.join(args.save_dir, 'knowledge')
-        args.inference_dir = os.path.join(args.save_dir, 'inference')
-        for d in [args.save_dir, args.tensorboard_dir, args.knowledge_dir, args.inference_dir]:
-            ensure_dir(d)
+        elif args.mode == 'eval':
+            if args.load_from_ckpt is not None:
+                args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
+                args.save_dir = args.save_dir.replace('runs/', 'eval/')
+                ckp = args.load_from_ckpt.split('ckp_')[-1].strip('.pth')
+                args.save_dir += f'_ckp-{ckp}'
+            elif args.eval_ckpt is not None:
+                args.save_dir = os.path.dirname(args.eval_ckpt)
+            else:
+                log.error('You must provide either --ckpt or --load_from_ckpt!')
+                exit(-1)
+            args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
+            args.knowledge_dir = os.path.join(args.save_dir, 'knowledge')
+            args.inference_dir = os.path.join(args.save_dir, 'inference')
+            for d in [args.save_dir, args.tensorboard_dir, args.knowledge_dir, args.inference_dir]:
+                ensure_dir(d)
 
-    log.info(f'Write to output directory: {args.save_dir}')
-    with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
-        json.dump(args.__dict__, f, indent=2)
+        log.info(f'Write to output directory: {args.save_dir}')
+        with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
+            json.dump(args.__dict__, f, indent=2)
 
     # Load data
     log.info(f'Loading data ...')
 
     if args.mode == 'train':
         train_dataset = QADataset('train', args.train_tasks)
-        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=QADataset.collate_fn)
+        # train ds is shuffled in its constructor
+        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QADataset.collate_fn)
         log.info(f'Loaded train set with {len(train_dataset)} instances')
 
         eval_dataset = QADataset('dev', args.train_tasks)
-        eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=QADataset.collate_fn)
+        eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QADataset.collate_fn)
         log.info(f'Loaded dev set with {len(eval_dataset)} instances')
 
     elif args.mode == 'eval':
@@ -177,7 +179,8 @@ def main():
         args.total_steps = ceil_div(args.total_episodes, args.batch_size)
         warmup_steps = math.ceil(args.num_warmup_step_ratio * args.total_steps)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=args.total_steps)
-        step_num = 0
+        init_step = 0
+        eval_accs = {}
 
         # Load from checkpoint if continue training
         if args.load_from_ckpt is not None:
@@ -186,7 +189,8 @@ def main():
             value.model.load_state_dict(checkpoint['value_model'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
-            step_num = checkpoint['step']
+            init_step = checkpoint['step']
+            eval_accs = checkpoint['eval_accs']
             checkpoint.clear()
 
             # Reuse the reward normalization results
@@ -217,17 +221,18 @@ def main():
 
         optimizer = None
         scheduler = None
+        init_step = 0
+        eval_accs = {}
 
         if args.load_from_ckpt is not None:
             checkpoint = torch.load(args.load_from_ckpt, map_location=torch.device('cpu'))
             policy.model.load_state_dict(checkpoint['policy_model'])
-            step_num = checkpoint['step']
+            init_step = checkpoint['step']
             checkpoint.clear()
         elif args.eval_ckpt is not None:
             checkpoint = torch.load(args.eval_ckpt, map_location=torch.device('cpu'))
             policy.model.load_state_dict(checkpoint)
             checkpoint.clear()
-            step_num = 0
 
     # Set up trainer
     trainer = PPOTrainer(
@@ -240,8 +245,9 @@ def main():
         reward_model=reward,
         optimizer=optimizer,
         scheduler=scheduler,
+        init_step=init_step,
+        eval_accs=eval_accs,
         log=log,
-        log_dir=args.tensorboard_dir,
     )
 
     # Normalize the rewards to so that initially they have mean 0, var 1
@@ -254,19 +260,20 @@ def main():
             else:
                 trainer.set_reward_norm()
             log.info(f'Set reward norm as gain = {reward.gain}, bias = {reward.bias}')
-            reward.write_reward_norm(args.reward_dir)
+            if not args.nosave:
+                reward.write_reward_norm(args.reward_dir)
 
     # Evaluate baseline (no knowledge)
     if args.eval_baseline:
-        trainer.eval(step=-1)
+        trainer.valid(step=-1)
 
     # Train or evaluate
     if args.mode == 'train':
-        pbar = tqdm(list(range(step_num, args.total_steps)))
-        for step_num in pbar:
-            trainer.train(step_num)
+        pbar = tqdm(list(range(init_step, args.total_steps)))
+        for step in pbar:
+            trainer.train(step)
     elif args.mode == 'eval':
-        trainer.eval(step=step_num)
+        trainer.eval(step)
 
 
 if __name__ == '__main__':

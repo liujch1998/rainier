@@ -1,4 +1,5 @@
 import os
+import random
 from torch.utils.data import Dataset
 
 datapath_by_task_and_split = {
@@ -33,6 +34,9 @@ class QADataset(Dataset):
         self.tasks = tasks.split(',')
 
         self.instances = self.load_datasets()
+
+        if split == 'train':
+            random.shuffle(self.instances)
 
     def __len__(self):
         return len(self.instances)
