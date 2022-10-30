@@ -88,7 +88,7 @@ def get_args():
     parser.add_argument(
         '--top_p', type=float, default=0.5, help='hyperparameter for nucleus sampling')
     parser.add_argument(
-        '--ensembling', type=str, default='max', choices=['max', 'moe', 'poe'], help='ensembling method for inference')
+        '--ensembling', type=str, default='max', choices=['max', 'moe', 'poe', 'majority'], help='ensembling method for inference')
 
     # other
     parser.add_argument(

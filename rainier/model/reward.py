@@ -252,20 +252,22 @@ class Reward:
         answer_probss = torch.stack(answer_probss)
 
         if self.ensembling == 'max':
-            answer_logits = answer_logitss.max(dim=0).values # (B, C)
             answer_probs = answer_probss.max(dim=0).values
+            preds = answer_probs.argmax(dim=1)
         elif self.ensembling == 'moe':
-            answer_logits = answer_logitss.mean(dim=0)
             answer_probs = answer_probss.mean(dim=0)
+            preds = answer_probs.argmax(dim=1)
         elif self.ensembling == 'poe':
-            answer_logits = answer_logitss.log().mean(dim=0).exp()
             answer_probs = answer_probss.log().mean(dim=0).exp()
+            preds = answer_probs.argmax(dim=1)
+        elif self.ensembling == 'majority':
+            predss = answer_probss.argmax(dim=2) # (K+1, B)
+            preds = predss.mode(dim=0).values
 
         num_ans = [len(c) for c in choicess]
         max_ans_num = max(num_ans)
 
         # Compute accuracy from argmax answer
-        preds = answer_probs.argmax(axis=1)
         corrects = (preds == torch.tensor(answer_ixs)).tolist()
 
         '''
@@ -281,8 +283,6 @@ class Reward:
             'preds': preds,
             'answer_logitss': answer_logitss,
             'answer_probss': answer_probss,
-            'answer_logits': answer_logits,
-            'answer_probs': answer_probs,
         }
 
     def write_reward_norm(self, reward_dir):

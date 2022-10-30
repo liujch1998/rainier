@@ -66,7 +66,7 @@ def main():
     elif args.mode == 'eval':
         if num_gpus == 4:  # 4x RTX6000
             device_map = {
-		0: [0],
+                0: [0],
                 1: [1, 2, 3, 4, 5, 6, 7],
                 2: [8, 9, 10, 11, 12, 13, 14, 15],
                 3: [16, 17, 18, 19, 20, 21, 22, 23],
@@ -276,7 +276,7 @@ def main():
         for step in pbar:
             trainer.train(step)
     elif args.mode == 'eval':
-        trainer.eval(step)
+        trainer.eval(init_step)
 
 
 if __name__ == '__main__':

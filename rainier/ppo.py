@@ -48,7 +48,7 @@ class PPOTrainer:
         self.log = log
         if not args.nosave:
             # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
-            wandb.init(project='rainier_stageII', name=args.run_name, config=args)
+            wandb.init(project='rainier_stageII' if args.mode == 'train' else 'rainier_eval', name=args.run_name, config=args)
             wandb.define_metric('eval/acc_unweighted', summary='max')
 
         if self.train_dataloader is not None:
@@ -310,8 +310,6 @@ class PPOTrainer:
                 item.update({
                     'scores_': results['answer_logitss'][:, i, :len(choices)].tolist(),
                     'probs_': results['answer_probss'][:, i, :len(choices)].tolist(),
-                    'scores': results['answer_logits'][i, :len(choices)].tolist(),
-                    'probs': results['answer_probs'][i, :len(choices)].tolist(),
                     'preds': choices[results['preds'][i].item()],
                     'ok': int(results['corrects'][i]),
                 })
