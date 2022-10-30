@@ -268,11 +268,11 @@ def main():
 
     # Evaluate baseline (no knowledge)
     if args.eval_baseline:
-        trainer.valid(step=-1)
+        trainer.eval(step=-1)
 
     # Train or evaluate
     if args.mode == 'train':
-        pbar = tqdm(list(range(init_step, args.total_steps)))
+        pbar = tqdm(list(range(init_step, args.total_steps + 1)))
         for step in pbar:
             trainer.train(step)
     elif args.mode == 'eval':

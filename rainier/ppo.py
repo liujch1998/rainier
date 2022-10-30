@@ -49,7 +49,10 @@ class PPOTrainer:
         if not args.nosave:
             # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
             wandb.init(project='rainier_stageII' if args.mode == 'train' else 'rainier_eval', name=args.run_name, config=args)
-            wandb.define_metric('eval/acc_unweighted', summary='max')
+            wandb.define_metric('train/step')
+            wandb.define_metric('eval/step')
+            wandb.define_metric('train/*', step_metric='train/step')
+            wandb.define_metric('eval/*', step_metric='eval/step', summary='max')
 
         if self.train_dataloader is not None:
             self.train_sampler = iter(self.train_dataloader)
@@ -191,8 +194,8 @@ class PPOTrainer:
             # for k, v in stats.items():
             #     self.writer.add_scalar(k, v, step)
 
-    def valid(self, step): # step=-1 for baseline
-        if step != -1 and step % self.args.eval_interval != 0:
+    def valid(self, step):
+        if step % self.args.eval_interval != 0:
             return
         if step in self.eval_accs:
             return
@@ -204,14 +207,11 @@ class PPOTrainer:
 
         for i, batch in enumerate(tqdm(self.eval_dataloader)):
             with torch.no_grad():
-                knowledges = None
-                # If not baseline, generate knowledge
-                if step != -1:
-                    rollouts = self.policy_model.sample(
-                        text=batch['question'],
-                        top_p=0.0,
-                    )
-                    knowledges = rollouts['response/text']
+                rollouts = self.policy_model.sample(
+                    text=batch['question'],
+                    top_p=0.0,
+                )
+                knowledges = rollouts['response/text']
 
                 results = self.reward_model.get_reward(
                     questions=batch['question'],
@@ -226,7 +226,7 @@ class PPOTrainer:
             for task, c in zip(batch['task'], results['corrects']):
                 corrects_by_task[task].append(c)
 
-            results_table.add_data(step, i, batch['task'][0], batch['question'][0], '' if knowledges is None else knowledges[0], results['preds'][0], batch['answer_ix'][0], results['corrects'][0])
+            results_table.add_data(step, i, batch['task'][0], batch['question'][0], knowledges[0], results['preds'][0], batch['answer_ix'][0], results['corrects'][0])
 
         acc_weighted = np.mean(corrects)
         acc_by_task = {k: np.mean(v) for k, v in corrects_by_task.items()}
@@ -265,7 +265,7 @@ class PPOTrainer:
                 self.save(step, last=False)
                 self.log.info(f'Best ckpt updated to [step {step}]')
 
-    def eval(self, step):
+    def eval(self, step): # step=-1 for baseline
         self.log.info(f'Evaluating [ppo_step {step}] ...')
 
         corrects = []
@@ -276,12 +276,14 @@ class PPOTrainer:
         for i, batch in enumerate(tqdm(self.eval_dataloader)):
             with torch.no_grad():
                 knowledgess = []
-                for j in range(self.args.num_samples):
-                    rollouts = self.policy_model.sample(
-                        text=batch['question'],
-                        top_p=self.args.top_p,
-                    )
-                    knowledgess.append(rollouts['response/text'])
+                # If not baseline, generate knowledge
+                if step != -1:
+                    for j in range(self.args.num_samples):
+                        rollouts = self.policy_model.sample(
+                            text=batch['question'],
+                            top_p=self.args.top_p,
+                        )
+                        knowledgess.append(rollouts['response/text'])
 
                 results = self.reward_model.get_reward_ensemble(
                     questions=batch['question'],
@@ -296,7 +298,7 @@ class PPOTrainer:
             for task, c in zip(batch['task'], results['corrects']):
                 corrects_by_task[task].append(c)
 
-            knowledgess = [list(x) for x in zip(*knowledgess)] # transpose the knowledege matrix
+            knowledgess = [list(x) for x in zip(*knowledgess)] if len(knowledgess) > 0 else [[] for _ in batch['question']] # transpose the knowledege matrix
             for i, (task, question, choices, answer_ix, knowledges) in enumerate(zip(batch['task'], batch['question'], batch['choices'], batch['answer_ix'], knowledgess)):
                 item = {
                     'task': task,
