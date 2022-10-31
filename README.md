@@ -2,6 +2,28 @@
 
 This repo hosts the code for the paper, [Rainier: Reinforced Knowledge Introspector for Commonsense Question Answering](https://arxiv.org/pdf/2210.03078.pdf)
 
+## Resources
+
+**Model**: Our Rainier model is now on huggingface model hub!
+```
+from transformers import T5Tokenizer, T5ForConditionalGeneration
+
+tokenizer = T5Tokenizer.from_pretrained('t5-large')
+model = T5ForConditionalGeneration.from_pretrained('liujch1998/rainier-large')
+
+question = "Google Maps and other highway and street GPS services have replaced what? \n (A) united states (B) mexico (C) countryside (D) atlas (E) oceans"
+input_ids = tokenizer(question, return_tensors='pt').input_ids
+output_ids = model.generate(input_ids, do_sample=True, top_p=0.5)
+knowledge = tokenizer.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)[0]
+knowledge
+```
+```
+Files can be shared over a computer network.
+```
+
+**Knowledge**: We release the commonsense datasets augmented with Rainier-generated knowledge.
+You can download the `knowledge_rainier.json` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing).
+
 ## Setup
 
 Create and activate the Conda environment:
@@ -61,7 +83,7 @@ First, generate silver knowledge from GPT-3.
 
 If you would like to use our pre-generated data, you can download a copy of our pre-generated knowledge.
 Go to `/data/` and run `gdown 1V6Za8BfEwWa4xRgXcVEFhS8tWepHZPAw`
-Alternatively, you can download the `knowledge.zip` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing), unzip it and put it under `/data/`
+Alternatively, you can download the `knowledge_gkp.zip` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing), unzip it and put it under `/data/`
 
 Otherwise, you can generate the knowledge yourself by going to the `/rainier/` directory and run
 ```
