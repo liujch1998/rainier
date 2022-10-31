@@ -73,7 +73,10 @@ class Trainer:
         if not args.nosave:
             # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
             wandb.init(project='rainier_stageI', name=args.run_name, config=args)
-            wandb.define_metric('eval/loss', summary='min')
+            wandb.define_metric('train/step')
+            wandb.define_metric('eval/step')
+            wandb.define_metric('train/loss', step_metric='train/step', summary='min')
+            wandb.define_metric('eval/loss', step_metric='eval/step', summary='min')
 
         self.train_sampler = iter(self.train_dataloader)
         for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_dataloader)):
@@ -237,6 +240,7 @@ def main():
         args.output_dir = '../runs_stageI/'
         if args.load_from_ckpt is not None:
             args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
+            args.run_name = args.save_dir.split('/')[-1]
         else:
             time = datetime.now()
             date_time = time.strftime('%b%d_%H-%M-%S')
@@ -296,7 +300,7 @@ def main():
     )
 
     # Train
-    pbar = tqdm(list(range(init_step, args.total_steps)))
+    pbar = tqdm(list(range(init_step, args.total_steps + 1)))
     for step in pbar:
         trainer.train(step)
 
