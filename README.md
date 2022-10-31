@@ -11,7 +11,7 @@ from transformers import T5Tokenizer, T5ForConditionalGeneration
 tokenizer = T5Tokenizer.from_pretrained('t5-large')
 model = T5ForConditionalGeneration.from_pretrained('liujch1998/rainier-large')
 
-question = "Google Maps and other highway and street GPS services have replaced what? \n (A) united states (B) mexico (C) countryside (D) atlas (E) oceans"
+question = "You can share files with someone if you have a connection to a what? \n (A) freeway (B) radio (C) wires (D) computer network (E) electrical circuit"
 input_ids = tokenizer(question, return_tensors='pt').input_ids
 output_ids = model.generate(input_ids, do_sample=True, top_p=0.5)
 knowledge = tokenizer.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)[0]
