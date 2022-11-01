@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 
 from args import get_args
-from utils.utils import ensure_dir, ceil_div
+from utils.utils import ensure_dir, ceil_div, set_seed
 from data import QADataset
 from model.policy import Policy
 from model.value import Value
@@ -27,15 +27,7 @@ log = logging.getLogger(__name__)
 def main():
     args = get_args()
 
-    # Random seeds
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    if torch.cuda.is_available() and args.cuda_deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    set_seed(args.seed, args.cuda_deterministic)
 
     # GPUs
     num_gpus = torch.cuda.device_count()
