@@ -5,20 +5,25 @@ This repo hosts the code for the paper, [Rainier: Reinforced Knowledge Introspec
 ## Resources
 
 **Model**: Our Rainier model is now on huggingface model hub!
-```
+```python
 from transformers import T5Tokenizer, T5ForConditionalGeneration
 
 tokenizer = T5Tokenizer.from_pretrained('t5-large')
 model = T5ForConditionalGeneration.from_pretrained('liujch1998/rainier-large')
 
-question = "You can share files with someone if you have a connection to a what? \n (A) freeway (B) radio (C) wires (D) computer network (E) electrical circuit"
+question = "Sydney rubbed Addison’s head because she had a horrible headache. What will happen to Sydney? \\n (A) drift to sleep (B) receive thanks (C) be reprimanded"
 input_ids = tokenizer(question, return_tensors='pt').input_ids
-output_ids = model.generate(input_ids, do_sample=True, top_p=0.5)
-knowledge = tokenizer.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)[0]
-knowledge
+output_ids = model.generate(input_ids, do_sample=True, top_p=0.5, num_return_sequences=10)
+knowledges = tokenizer.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+print(list(set(knowledges)))
 ```
 ```
-Files can be shared over a computer network.
+Sydney will receive thanks.
+Rubbed head is a good way to relieve headaches.
+Sydney is a good friend to Addison.
+The more you help someone, the more you get appreciated.
+The act of rubbing someone’s head can relieve headaches.
+Sydney will be rewarded.
 ```
 
 **Knowledge**: We release the commonsense datasets augmented with Rainier-generated knowledge.
