@@ -1,5 +1,5 @@
 /logs/
-/runs/
+/runs*/
 /eval/
 /data/uqa
 /data/numersense
@@ -8,5 +8,6 @@
 /data/hellaswag
 /data/knowledge
 /model/
+**/wandb/
 **/__pycache__/
 *.swp

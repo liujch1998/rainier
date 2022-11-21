@@ -1,12 +1,10 @@
-import os
-import json
 from datetime import datetime
-import logging
 import itertools
-from tqdm import tqdm
+import json
+import logging
 import math
-import random
-import numpy as np
+import os
+from tqdm import tqdm
 
 import torch
 from torch.utils.data import DataLoader
@@ -47,7 +45,7 @@ def main():
                 1: [1, 2, 3],
                 2: [4, 5, 6],
                 3: [7, 8, 9],
-                4: [10, 11 ,12],
+                4: [10, 11, 12],
                 5: [13, 14, 15],
                 6: [16, 17, 18, 19],
                 7: [20, 21, 22, 23],
