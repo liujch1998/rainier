@@ -28,10 +28,13 @@ tasks_by_split = {
 }
 '''
 
+# This does not lowercase the data, by default
 class QADataset(Dataset):
-    def __init__(self, split, tasks):
+    def __init__(self, split, tasks, lower=False):
+        super().__init__()
         self.split = split
         self.tasks = tasks.split(',')
+        self.lower = lower
 
         self.instances = self.load_datasets()
 
@@ -81,6 +84,10 @@ class QADataset(Dataset):
                     except Exception as e:
                         skipped += 1
                         continue
+                    if self.lower:
+                        q = q.lower()
+                        choices = [choice.lower() for choice in choices]
+                        a = a.lower()
                     instances.append({
                         'task': task,
                         'question': q,
