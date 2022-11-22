@@ -80,8 +80,8 @@ class Trainer:
             wandb.init(project='rainier_stageI', name=args.run_name, config=args)
             wandb.define_metric('train/step')
             wandb.define_metric('eval/step')
-            wandb.define_metric('train/loss', step_metric='train/step', summary='min')
-            wandb.define_metric('eval/loss', step_metric='eval/step', summary='min')
+            wandb.define_metric('train/*', step_metric='train/step')
+            wandb.define_metric('eval/*', step_metric='eval/step')
 
         for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_dataloader)):
             next(self.train_sampler)

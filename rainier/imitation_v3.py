@@ -88,8 +88,8 @@ class Trainer:
             wandb.init(project='rainier_stageI', name=args.run_name, config=args)
             wandb.define_metric('train/step')
             wandb.define_metric('eval/step')
-            wandb.define_metric('train/loss', step_metric='train/step', summary='min')
-            wandb.define_metric('eval/loss', step_metric='eval/step', summary='min')
+            wandb.define_metric('train/*', step_metric='train/step')
+            wandb.define_metric('eval/*', step_metric='eval/step')
 
         for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_qk_dataloader)):
             next(self.train_qk_sampler)
@@ -117,7 +117,7 @@ class Trainer:
         losses = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
         losses = losses.view(labels.shape) # (B, L)
         loss_mask = target_tok.attention_mask
-        loss_mask[:, :2] = 0
+        loss_mask[:, :2] = 0 # Because "Knowledege:" is two tokens
         losses = reduce_mean(losses, loss_mask, axis=-1) # (B)
         loss = losses.mean()
 
@@ -129,7 +129,7 @@ class Trainer:
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
         target_tok = self.tokenizer.batch_encode_plus(
             batch['answer'],
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_output_len).to(self.device)
         labels = target_tok.input_ids
         labels[target_tok.attention_mask == 0] = -100
 
@@ -139,12 +139,6 @@ class Trainer:
             labels=labels,
         ).loss
 
-        return loss
-
-    def loss(self, qk_batch, qa_batch):
-        qk_loss = self.qk_loss(qk_batch)
-        qa_loss = self.qa_loss(qa_batch)
-        loss = qk_loss + qa_loss
         return loss
 
     def train(self, step):
@@ -164,14 +158,21 @@ class Trainer:
             except StopIteration:
                 self.train_qa_sampler = iter(self.train_qa_dataloader)
                 qa_batch = next(self.train_qa_sampler)
-            loss = self.loss(qk_batch, qa_batch)
+            qk_loss = self.qk_loss(qk_batch)
+            qa_loss = self.qa_loss(qa_batch)
+            loss = qk_loss + qa_loss
             loss.backward()
         self.optimizer.step()
 
         if not self.args.nosave:
             if step % self.args.log_interval == 0:
                 # self.writer.add_scalar('train/loss', loss.item(), step)
-                wandb.log({'train/loss': loss.item(), 'train/step': step})
+                wandb.log({
+                    'train/step': step,
+                    'train/loss': loss.item(),
+                    'train/qk_loss': qk_loss.item(),
+                    'train/qa_loss': qa_loss.item(),
+                })
 
     # The code in this function is adapted from Reward.get_reward() in rainier/rainier/model/reward.py
     def acc(self, batch):
@@ -195,7 +196,7 @@ class Trainer:
 
             # Tokenize prompts and inputs
             tokenized_prompts = self.tokenizer(batch_prompts, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
-            tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
+            tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_output_len).to(self.device)
             tokenized_choices_ids = tokenized_choices.input_ids
             pad_mask = (tokenized_choices_ids == self.tokenizer.pad_token_id)
 
