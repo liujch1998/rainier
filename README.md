@@ -11,20 +11,26 @@ from transformers import T5Tokenizer, T5ForConditionalGeneration
 tokenizer = T5Tokenizer.from_pretrained('t5-large')
 model = T5ForConditionalGeneration.from_pretrained('liujch1998/rainier-large')
 
-question = "Sydney rubbed Addison’s head because she had a horrible headache. What will happen to Sydney? \\n (A) drift to sleep (B) receive thanks (C) be reprimanded"
+question = "Sydney rubbed Addison’s head because she had a horrible headache. " \
+           "What will happen to Sydney? \\n " \
+           "(A) drift to sleep (B) receive thanks (C) be reprimanded"
 input_ids = tokenizer(question, return_tensors='pt').input_ids
 output_ids = model.generate(input_ids, do_sample=True, top_p=0.5, num_return_sequences=10)
-knowledges = tokenizer.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+knowledges = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
 print(list(set(knowledges)))
 ```
-```
-Sydney will receive thanks.
-Rubbed head is a good way to relieve headaches.
-Sydney is a good friend to Addison.
-The more you help someone, the more you get appreciated.
-The act of rubbing someone’s head can relieve headaches.
-Sydney will be rewarded.
-```
+Outputs:
+> Sydney will receive thanks.
+>
+> Rubbed head is a good way to relieve headaches.
+>
+> Sydney is a good friend to Addison.
+>
+> The more you help someone, the more you get appreciated.
+>
+> The act of rubbing someone’s head can relieve headaches.
+>
+> Sydney will be rewarded.
 
 **Knowledge**: We release the commonsense datasets augmented with Rainier-generated knowledge.
 You can download the `knowledge_rainier.json` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing).
