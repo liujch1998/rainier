@@ -20,17 +20,25 @@ knowledges = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
 print(list(set(knowledges)))
 ```
 Outputs:
-> Sydney will receive thanks.
+> Sydney is a good friend to Addison.
+>
+> Sydney is a kind person.
+>
+> One should be thankful for the help of others.
 >
 > Rubbed head is a good way to relieve headaches.
 >
-> Sydney is a good friend to Addison.
+> The head is a very sensitive area.
 >
-> The more you help someone, the more you get appreciated.
+> One should be grateful for the help of others.
 >
-> The act of rubbing someone’s head can relieve headaches.
+> The head is the most sensitive part of the body.
 >
-> Sydney will be rewarded.
+> The person who rubs the head is a good person.
+>
+> Sydney will be grateful.
+>
+> The head is a sensitive area.
 
 **Knowledge**: We release the commonsense datasets augmented with Rainier-generated knowledge.
 You can download the `knowledge_rainier.json` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing).

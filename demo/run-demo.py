@@ -75,7 +75,7 @@ class InteractiveRainier:
         knowledges = [''] + knowledges
 
         prompts = [question + (f' \\n {knowledge}' if knowledge != '' else '') for knowledge in knowledges]
-        choices = self.parse_choices(question)
+        choices = self.parse_choices(question.split('\\n')[1].strip(' '))
         prompts = [prompt.lower() for prompt in prompts]
         choices = [choice.lower() for choice in choices]
         answer_logitss = []
@@ -89,6 +89,7 @@ class InteractiveRainier:
             with torch.no_grad():
                 logits = self.qa_model(
                     input_ids=tokenized_prompts.input_ids,
+                    attention_mask=tokenized_prompts.attention_mask,
                     labels=tokenized_choices.input_ids,
                 ).logits # (1+K, L, V)
 
@@ -124,12 +125,12 @@ if not debug:
 
 # These examples are copied from Table 5 of the Rainier paper
 questions = [
-    'Sydney rubbed Addison’s head because she had a horrible headache. What will happen to Sydney? \\n (A) drift to sleep (B) receive thanks (C) be reprimanded',
+    'If the mass of an object gets bigger what will happen to the amount of matter contained within it? \\n (A) gets bigger (B) gets smaller',
     'What would vinyl be an odd thing to replace? \\n (A) pants (B) record albums (C) record store (D) cheese (E) wallpaper',
     'Some pelycosaurs gave rise to reptile ancestral to \\n (A) lamphreys (B) angiosperm (C) mammals (D) paramecium (E) animals (F) protozoa (G) arachnids (H) backbones',
+    'Sydney rubbed Addison’s head because she had a horrible headache. What will happen to Sydney? \\n (A) drift to sleep (B) receive thanks (C) be reprimanded',
     'Adam always spent all of the free time watching Tv unlike Hunter who volunteered, due to _ being lazy. \\n (A) Adam (B) Hunter',
     'Causes bad breath and frightens blood-suckers \\n (A) tuna (B) iron (C) trash (D) garlic (E) pubs',
-    'If the mass of an object gets bigger what will happen to the amount of matter contained within it? \\n (A) gets bigger (B) gets smaller',
 ]
 
 @app.route('/')
