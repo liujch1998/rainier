@@ -109,12 +109,12 @@ def main():
     log.info(f'Loading data ...')
 
     if args.mode == 'train':
-        train_dataset = QADataset('train', args.train_tasks)
+        train_dataset = QADataset('train', args.train_tasks, args.data_path)
         # train ds is shuffled in its constructor
         train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QADataset.collate_fn)
         log.info(f'Loaded train set with {len(train_dataset)} instances')
 
-        eval_dataset = QADataset('dev', args.train_tasks)
+        eval_dataset = QADataset('dev', args.train_tasks, args.data_path)
         eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QADataset.collate_fn)
         log.info(f'Loaded dev set with {len(eval_dataset)} instances')
 
@@ -122,7 +122,7 @@ def main():
         train_dataset = None
         train_dataloader = None
 
-        eval_dataset = QADataset(args.eval_split, args.eval_tasks)
+        eval_dataset = QADataset(args.eval_split, args.eval_tasks, args.data_path)
         eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=QADataset.collate_fn)
         log.info(f'Loaded {args.eval_split} set with {len(eval_dataset)} instances')
 

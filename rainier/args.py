@@ -10,6 +10,9 @@ def get_args():
 
     # dataset
     parser.add_argument(
+        '--data_path', type=str, default='../data/{datapath}/{split}.tsv')
+    # '../data/knowledge/knowledge_gkp_gpt3curie.{split}.{task}.json'
+    parser.add_argument(
         '--train_tasks', type=str, default='obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg')
     parser.add_argument(
         '--eval_tasks', type=str, default='obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg,numersense,riddlesense,quartz,hellaswag')

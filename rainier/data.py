@@ -1,3 +1,4 @@
+import json
 import os
 import random
 from torch.utils.data import Dataset
@@ -30,11 +31,11 @@ tasks_by_split = {
 
 # This does not lowercase the data, by default
 class QADataset(Dataset):
-    def __init__(self, split, tasks, lower=False):
+    def __init__(self, split, tasks, data_path):
         super().__init__()
         self.split = split
         self.tasks = tasks.split(',')
-        self.lower = lower
+        self.data_path = data_path
 
         self.instances = self.load_datasets()
 
@@ -67,35 +68,56 @@ class QADataset(Dataset):
             choice = choice.strip(' ')
             choices.append(choice)
             return choices
-    
+
         instances = []
-        for task in self.tasks:
-            skipped = 0
-            datapath_by_split = datapath_by_task_and_split[task]
-            datapath = datapath_by_split[self.split if self.split in datapath_by_split else 'default']
-            with open(os.path.join('../data', datapath, f'{self.split}.tsv')) as f:
-                for line in f:
-                    try:
-                        q, a = line.strip('\n').split('\t')
-                        q = q.strip(' ')
-                        a = a.strip(' ')
-                        choices = parse_choices(q.split('\\n')[1].strip(' '))
-                        answer_ix = choices.index(a)
-                    except Exception as e:
-                        skipped += 1
-                        continue
-                    if self.lower:
-                        q = q.lower()
-                        choices = [choice.lower() for choice in choices]
-                        a = a.lower()
-                    instances.append({
-                        'task': task,
-                        'question': q,
-                        'choices': choices,
-                        'answer': a,
-                        'answer_ix': answer_ix,
-                    })
-            print(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
+        if self.data_path.endswith('.tsv'):
+            for task in self.tasks:
+                skipped = 0
+                datapath_by_split = datapath_by_task_and_split[task]
+                datapath = datapath_by_split[self.split if self.split in datapath_by_split else 'default']
+                with open(self.data_path.replace('{datapath}', datapath).replace('{split}', self.split)) as f:
+                    for line in f:
+                        try:
+                            q, a = line.strip('\n').split('\t')
+                            q = q.strip(' ')
+                            a = a.strip(' ')
+                            choices = parse_choices(q.split('\\n')[1].strip(' '))
+                            answer_ix = choices.index(a)
+                        except Exception as e:
+                            skipped += 1
+                            continue
+                        instances.append({
+                            'task': task,
+                            'question': q,
+                            'choices': choices,
+                            'answer': a,
+                            'answer_ix': answer_ix,
+                        })
+                print(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
+        elif self.data_path.endswith('.json'):
+            for task in self.tasks:
+                skipped = 0
+                with open(self.data_path.replace('{task}', task).replace('{split}', self.split)) as f:
+                    js = json.load(f)
+                    for item in js:
+                        try:
+                            q, a = item['query'], item['answer']
+                            choices = parse_choices(q.split('\\n')[1].strip(' '))
+                            answer_ix = choices.index(a)
+                            knowledges = item['knowledges']
+                        except Exception as e:
+                            skipped += 1
+                            continue
+                        instances.append({
+                            'task': task,
+                            'question': q,
+                            'choices': choices,
+                            'answer': a,
+                            'answer_ix': answer_ix,
+                            'knowledges': knowledges,
+                        })
+                print(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
+        print(f'Loaded split {self.split} with {len(instances)} total instances')
         return instances
 
     # Make a collate function to fix dataloader weird list batching

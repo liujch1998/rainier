@@ -124,6 +124,10 @@ class Trainer:
         return loss
 
     def qa_loss(self, batch):
+        # lowercase everything
+        batch['question'] = [q.lower() for q in batch['question']]
+        batch['answer'] = [a.lower() for a in batch['answer']]
+
         source_tok = self.tokenizer.batch_encode_plus(
             batch['question'],
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
@@ -406,8 +410,8 @@ def main():
     log.info(f'Loading data ...')
     train_qk_dataset = QKDataset('train', args.train_tasks)
     eval_qk_dataset = QKDataset('dev', args.train_tasks)
-    train_qa_dataset = QADataset('train', args.train_tasks, lower=True)
-    eval_qa_dataset = QADataset('dev', args.train_tasks, lower=True)
+    train_qa_dataset = QADataset('train', args.train_tasks, args.data_path)
+    eval_qa_dataset = QADataset('dev', args.train_tasks, args.data_path)
     # train ds is shuffled in its constructor
     train_qk_dataloader = DataLoader(train_qk_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QKDataset.collate_fn)
     eval_qk_dataloader = DataLoader(eval_qk_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QKDataset.collate_fn)

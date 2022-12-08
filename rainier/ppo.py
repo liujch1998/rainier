@@ -279,11 +279,15 @@ class PPOTrainer:
                 # If not baseline, generate knowledge
                 if step != -1:
                     for j in range(self.args.num_samples):
-                        rollouts = self.policy_model.sample(
-                            text=batch['question'],
-                            top_p=self.args.top_p,
-                        )
-                        knowledgess.append(rollouts['response/text'])
+                        if 'knowledges' not in batch:
+                            rollouts = self.policy_model.sample(
+                                text=batch['question'],
+                                top_p=self.args.top_p,
+                            )
+                            knowledgess.append(rollouts['response/text'])
+                        else:
+                            knowledges = [ks[j] for ks in batch['knowledges']]
+                            knowledgess.append(knowledges)
 
                 results = self.reward_model.get_reward_ensemble(
                     questions=batch['question'],
@@ -330,21 +334,22 @@ class PPOTrainer:
         # self.writer.add_scalar('eval/acc_unweighted', acc_unweighted, step)
         # for task, acc in acc_by_task.items():
         #     self.writer.add_scalar(f'eval/acc/{task}', acc, step)
-        stats = {
-            'eval/step': step,
-            'eval/acc_weighted': acc_weighted,
-            'eval/acc_unweighted': acc_unweighted,
-        }
-        for task, acc in acc_by_task.items():
-            stats[f'eval/acc/{task}'] = acc
-        wandb.log(stats)
+        if not self.args.nosave:
+            stats = {
+                'eval/step': step,
+                'eval/acc_weighted': acc_weighted,
+                'eval/acc_unweighted': acc_unweighted,
+            }
+            for task, acc in acc_by_task.items():
+                stats[f'eval/acc/{task}'] = acc
+            wandb.log(stats)
 
-        knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
-        inference_path = os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
-        with open(knowledge_path, 'w') as f:
-            json.dump(knowledge_outputs, f, indent=4)
-        with open(inference_path, 'w') as f:
-            json.dump(inference_outputs, f, indent=4)
+            knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
+            inference_path = os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
+            with open(knowledge_path, 'w') as f:
+                json.dump(knowledge_outputs, f, indent=4)
+            with open(inference_path, 'w') as f:
+                json.dump(inference_outputs, f, indent=4)
 
     """
     Internally set bias and gain terms based on the data from the dataloader
