@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=eval_imitation-v3-large_imitation-v3-large
+#SBATCH --job-name=eval_imitation-v3.1-large_imitation-v3.1-large
 #SBATCH --partition=gpu-rtx6k
 #SBATCH --account=h2lab
 #SBATCH --nodes=1
@@ -17,5 +17,5 @@ conda activate rainier_new_transformers
 cd /gscratch/xlab/liujc/rainier/rainier
 python main.py --mode eval \
     --eval_tasks obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg \
-    --load_from_ckpt ../runs_stageI/Nov21_20-02-36_learnfair0794/model/ckp_50000.pth
-
+    --load_from_ckpt ../runs_stageI/Dec08_05-15-21_g3022/model/ckp_50000.pth \
+    --eval_baseline

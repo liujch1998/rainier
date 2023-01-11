@@ -33,6 +33,8 @@ def get_args():
     parser.add_argument(
         '--qa_model_ckpt', type=str, default=None, help='model ckpt used for QA')
     parser.add_argument(
+        '--policy_reward_sharing', action='store_true', default=False)
+    parser.add_argument(
         '--max_input_len', type=int, default=256, help='max length of the input prompt')
     parser.add_argument(
         '--max_output_len', type=int, default=32, help='max length of the output knowledge')

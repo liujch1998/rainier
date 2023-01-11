@@ -1,0 +1,19 @@
+name: rainier_new_transformers
+channels:
+  - pytorch
+  - anaconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8.5
+  - pytorch=1.8.1
+  - pytorch-lightning=1.6.3
+  - transformers=4.23.1
+  - tokenizers=0.13.2
+  - sentencepiece=0.1.96
+  - openai
+  - numpy
+  - tqdm
+  - tensorboard
+  - gdown
+  - wandb

@@ -160,6 +160,7 @@ def main():
         reward = Reward(
             model_type=args.qa_model_type,
             model_ckpt=args.qa_model_ckpt,
+            model=policy.model if args.policy_reward_sharing else None,
             max_input_len=args.max_input_len,
             batch_size=args.batch_size,
             reward_shape=args.reward_shape,
@@ -204,12 +205,14 @@ def main():
         reward = Reward(
             model_type=args.qa_model_type,
             model_ckpt=args.qa_model_ckpt,
+            model=policy.model if args.policy_reward_sharing else None,
             max_input_len=args.max_input_len,
             batch_size=args.batch_size,
             reward_shape=args.reward_shape,
             kl_coef=args.kl_coef,
             ensembling=args.ensembling,
             device=devices[0],
+            device_map=device_map,
         )
 
         optimizer = None
@@ -219,7 +222,7 @@ def main():
 
         if args.load_from_ckpt is not None:
             checkpoint = torch.load(args.load_from_ckpt, map_location=torch.device('cpu'))
-            policy.model.load_state_dict(checkpoint['policy_model'])
+            policy.model.load_state_dict(checkpoint['policy_model' if 'policy_model' in checkpoint else 'model']) 
             init_step = checkpoint['step']
             checkpoint.clear()
         elif args.eval_ckpt is not None:

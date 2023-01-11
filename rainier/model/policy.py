@@ -13,6 +13,7 @@ class Policy:
                  model_type: str,
                  model_ckpt: str,
                  policy_value_sharing: bool,
+                 policy_reward_sharing: bool,
                  max_input_len: int,
                  max_output_len: int,
                  device,
@@ -33,6 +34,7 @@ class Policy:
             self.model.parallelize(device_map=device_map)
 
         self.policy_value_sharing = policy_value_sharing
+        self.policy_reward_sharing = policy_reward_sharing
         self.max_input_len = max_input_len
         self.max_output_len = max_output_len
         self.device = device
@@ -51,17 +53,31 @@ class Policy:
         input_ids = tokenized.input_ids.to(self.device)
         attention_mask = tokenized.attention_mask.to(self.device)
 
-        response_ids = self.model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=self.max_output_len + 1,
-            min_length=3,
-            do_sample=sample,
-            top_k=top_k,
-            top_p=top_p,
-            temperature=temperature,
-        ) # begins with 0 ([BOS]); ends with 1 ([EOS])
-        response_ids = response_ids[:, 1:].contiguous() # no beginning; ends with 1 ([EOS])
+        if not self.policy_reward_sharing:
+            response_ids = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=self.max_output_len + 1,
+                min_length=3,
+                do_sample=sample,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+            ) # begins with 0 ([BOS]); ends with 1 ([EOS])
+            response_ids = response_ids[:, 1:].contiguous() # no beginning; ends with 1 ([EOS])
+        else:
+            response_ids = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_length=self.max_output_len + 1,
+                min_length=3,
+                do_sample=sample,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+                forced_decoder_ids=[[1, 16113], [2, 10]], # 'Knowledge:' is 2 tokens under T5Tokenizer
+            ) # begins with 0 ([BOS]); ends with 1 ([EOS])
+            response_ids = response_ids[:, 3:].contiguous() # no beginning; ends with 1 ([EOS])
         response_mask = (response_ids != self.model.config.pad_token_id).int()
         response_text = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
 

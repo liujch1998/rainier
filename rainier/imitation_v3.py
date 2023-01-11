@@ -323,12 +323,13 @@ def get_args():
     parser = argparse.ArgumentParser()
 
     # common
-    parser.add_argument('--model_type', type=str, default='t5-large', choices=['t5-large', 'allenai/unifiedqa-v2-t5-large-1251000'])
+    parser.add_argument('--model_type', type=str, default='t5-large', choices=['t5-large', 'allenai/unifiedqa-t5-large', 'allenai/unifiedqa-v2-t5-large-1251000'])
     parser.add_argument('--load_from_ckpt', default=None)
     parser.add_argument('--max_input_len', type=int, default=256)
     parser.add_argument('--max_output_len', type=int, default=32)
 
     # train
+    parser.add_argument('--data_path', type=str, default='../data/{datapath}/{split}.tsv')
     parser.add_argument('--train_tasks', type=str, default='obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg')
     parser.add_argument('--total_steps', type=int, default=50000)
     parser.add_argument('--batch_size', type=int, default=64)

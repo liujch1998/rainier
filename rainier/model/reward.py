@@ -13,17 +13,24 @@ class Reward:
     def __init__(self,
                  model_type,
                  model_ckpt,
+                 model,
                  max_input_len,
                  batch_size,
                  reward_shape,
                  kl_coef,
                  ensembling,
                  device: torch.device,
+                 device_map=None,
                 ):
         self.tokenizer = T5Tokenizer.from_pretrained(model_type)
-        self.inference_model = T5ForConditionalGeneration.from_pretrained(model_ckpt if model_ckpt is not None else model_type)
-        self.inference_model.eval()
-        self.inference_model.to(device)
+
+        if model is not None:
+            self.inference_model = model
+        else:
+            self.inference_model = T5ForConditionalGeneration.from_pretrained(model_ckpt if model_ckpt is not None else model_type)
+            self.inference_model.eval()
+            self.inference_model.to(device)
+            self.inference_model.parallelize(device_map=device_map)
 
         self.gain, self.bias = None, None
         self.max_input_len = max_input_len
