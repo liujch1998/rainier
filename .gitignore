@@ -1,6 +1,7 @@
 /logs/
 /runs*/
 /eval/
+/data
 /data/uqa
 /data/numersense
 /data/riddlesense

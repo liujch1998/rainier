@@ -19,6 +19,14 @@ datapath_by_task_and_split = {
     'riddlesense': {'default': 'riddlesense'},
     'quartz': {'default': 'quartz'},
     'hellaswag': {'default': 'hellaswag'},
+
+    'sciq': {'default': 'sciq'},
+    'quarel': {'default': 'quarel'},
+    'quartz': {'default': 'quartz'},
+    'wsc273_': {'default': 'wsc273_'},
+    'copa_': {'default': 'copa_'},
+    'numersense_': {'default': 'numersense_'},
+    'truthfulqa_mc1': {'default': 'truthfulqa_mc1'},
 }
 
 '''
