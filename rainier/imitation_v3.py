@@ -124,9 +124,9 @@ class Trainer:
         return loss
 
     def qa_loss(self, batch):
-        # lowercase everything
-        batch['question'] = [q.lower() for q in batch['question']]
-        batch['answer'] = [a.lower() for a in batch['answer']]
+        # # lowercase everything
+        # batch['question'] = [q.lower() for q in batch['question']]
+        # batch['answer'] = [a.lower() for a in batch['answer']]
 
         source_tok = self.tokenizer.batch_encode_plus(
             batch['question'],
@@ -354,14 +354,12 @@ def main():
     set_seed()
 
     # GPUs
+    assert torch.cuda.is_available(), 'CUDA is not available'
     num_gpus = torch.cuda.device_count()
     log.info(f'Detected {num_gpus} GPUS')
     devices = {}
-    if torch.cuda.is_available():
-        for i in range(num_gpus):
-            devices[i] = torch.device('cuda:' + str(i))
-    else:
-        devices[0] = torch.device('cpu')
+    for i in range(num_gpus):
+        devices[i] = torch.device('cuda:' + str(i))
 
     device_map = None
     if num_gpus == 4:  # 4x RTX6000 for T5-large

@@ -28,15 +28,13 @@ def main():
     set_seed(args.seed, args.cuda_deterministic)
 
     # GPUs
+    assert torch.cuda.is_available(), 'CUDA is not available'
     num_gpus = torch.cuda.device_count()
     log.info(f'Detected {num_gpus} GPUS')
     devices = {}
-    if torch.cuda.is_available():
-        for i in range(num_gpus):
-            devices[i] = torch.device('cuda:' + str(i))
-    else:
-        devices[0] = torch.device('cpu')
-
+    for i in range(num_gpus):
+        devices[i] = torch.device('cuda:' + str(i))
+ 
     device_map = None
     if args.mode == 'train':
         if num_gpus == 8:  # 8x RTX6000

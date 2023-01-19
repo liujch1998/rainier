@@ -9,9 +9,9 @@ class Value:
     def __init__(self,
                  model_type,
                  model_ckpt,
-                 device,
-                 device_map,
-                 model=None,
+                 model,
+                 device: torch.device,
+                 device_map=None,
                 ):
         self.tokenizer = T5Tokenizer.from_pretrained(model_type)
 

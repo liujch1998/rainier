@@ -16,8 +16,8 @@ class Policy:
                  policy_reward_sharing: bool,
                  max_input_len: int,
                  max_output_len: int,
-                 device,
-                 device_map = None,
+                 device: torch.device,
+                 device_map=None,
                 ):
         self.tokenizer = T5Tokenizer.from_pretrained(model_type)
         if policy_value_sharing:
@@ -30,8 +30,7 @@ class Policy:
             checkpoint.clear()
         self.model.eval()
         self.model.to(device)
-        if device != 'cpu':
-            self.model.parallelize(device_map=device_map)
+        self.model.parallelize(device_map=device_map)
 
         self.policy_value_sharing = policy_value_sharing
         self.policy_reward_sharing = policy_reward_sharing

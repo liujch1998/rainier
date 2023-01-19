@@ -2,8 +2,8 @@
 #SBATCH --job-name=train_imitation-v3-large
 #SBATCH --partition=devlab
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
 #SBATCH --gpus-per-node=4
 #SBATCH --constraint="volta32gb"
 #SBATCH --time=72:00:00
