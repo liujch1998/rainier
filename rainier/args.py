@@ -52,6 +52,8 @@ def get_args():
         '--gain', type=float, default=None, help='precomputed normalization factor for reward')
     parser.add_argument(
         '--bias', type=float, default=None, help='precomputed normalization factor for reward')
+    parser.add_argument(
+        '--do_not_lowercase', default=False, action='store_true')
 
     # ppo
     parser.add_argument(

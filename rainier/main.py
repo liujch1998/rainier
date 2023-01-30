@@ -69,9 +69,9 @@ def main():
                 args.run_name = args.save_dir.split('/')[-1]
             else:
                 time = datetime.now()
-                date_time = time.strftime('%b%d_%H-%M-%S')
+                date_time = time.strftime('%Y%m%d-%H%M%S')
                 import socket
-                args.run_name = date_time + '_' + socket.gethostname()
+                args.run_name = date_time + '_' + socket.gethostname() + '_' + args.job_name
                 args.save_dir = os.path.join(args.output_dir, args.run_name)
             args.reward_dir = os.path.join(args.save_dir, 'reward')
             args.model_dir = os.path.join(args.save_dir, 'model')
@@ -166,6 +166,7 @@ def main():
             reward_shape=args.reward_shape,
             kl_coef=args.kl_coef,
             ensembling=args.ensembling,
+            do_not_lowercase=args.do_not_lowercase,
             device=devices[0],
         )
 
@@ -212,6 +213,7 @@ def main():
             reward_shape=args.reward_shape,
             kl_coef=args.kl_coef,
             ensembling=args.ensembling,
+            do_not_lowercase=args.do_not_lowercase,
             device=devices[0],
             device_map=device_map,
         )

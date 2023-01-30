@@ -22,7 +22,7 @@ logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'))
 log = logging.getLogger(__name__)
 
 
-class QKDataset(Dataset):
+class QKADataset(Dataset):
     def __init__(self, split, tasks):
         super().__init__()
         self.split = split
@@ -40,17 +40,53 @@ class QKDataset(Dataset):
         return self.instances[idx]
 
     def load_datasets(self):
+        def parse_choices(s):
+            '''
+            s: serialized_choices '(A) ... (B) ... (C) ...'
+            '''
+            choices = []
+            key = 'A' if s.find('(A)') != -1 else 'a'
+            while True:
+                pos = s.find(f'({chr(ord(key) + 1)})')
+                if pos == -1:
+                    break
+                choice = s[3:pos]
+                s = s[pos:]
+                choice = choice.strip(' ')
+                choices.append(choice)
+                key = chr(ord(key) + 1)
+            choice = s[3:]
+            choice = choice.strip(' ')
+            choices.append(choice)
+            return choices
+
         ds = []
         for task in self.tasks:
             path = f'../data/knowledge/knowledge_gkp_gpt3curie.{self.split}.{task}.json'
             with open(path) as f:
                 js = json.load(f)
+            skipped = 0
             for item in js:
+                try:
+                    q, a = item['query'], item['answer']
+                    choices = parse_choices(q.split('\\n')[1].strip(' '))
+                    answer_ix = choices.index(a)
+                except Exception as e:
+                    skipped += 1
+                    continue
                 for k in range(len(item['knowledges'])):
-                    ds.append({'source': item['query'], 'target': 'Knowledge: ' + item['knowledges'][k]})
+                    ds.append({
+                        'task': task,
+                        'question': q,
+                        'choices': choices,
+                        'answer': a,
+                        'answer_ix': answer_ix,
+                        'knowledge': item['knowledges'][k],
+                    })
                     # for evaluation, only keep the first knowledge for sake of speed
                     if self.split == 'dev':
                         break
+            print(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
         print(f'{self.split} set size = {len(ds)}')
         return ds
 
@@ -61,10 +97,8 @@ class QKDataset(Dataset):
 class Trainer:
     def __init__(self,
                  args,
-                 train_qk_dataloader,
-                 eval_qk_dataloader,
-                 train_qa_dataloader,
-                 eval_qa_dataloader,
+                 train_dataloader,
+                 eval_dataloader,
                  tokenizer,
                  model,
                  optimizer,
@@ -73,12 +107,9 @@ class Trainer:
                  device,
                 ):
         self.args = args
-        self.train_qk_dataloader = train_qk_dataloader
-        self.eval_qk_dataloader = eval_qk_dataloader
-        self.train_qk_sampler = iter(self.train_qk_dataloader)
-        self.train_qa_dataloader = train_qa_dataloader
-        self.eval_qa_dataloader = eval_qa_dataloader
-        self.train_qa_sampler = iter(self.train_qa_dataloader)
+        self.train_dataloader = train_dataloader
+        self.eval_dataloader = eval_dataloader
+        self.train_sampler = iter(self.train_dataloader)
         self.tokenizer = tokenizer
         self.model = model
         self.optimizer = optimizer
@@ -91,20 +122,20 @@ class Trainer:
             wandb.define_metric('train/*', step_metric='train/step')
             wandb.define_metric('eval/*', step_metric='eval/step')
 
-        for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_qk_dataloader)):
-            next(self.train_qk_sampler)
-        for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_qa_dataloader)):
-            next(self.train_qa_sampler)
+        for _ in range((init_step * args.accumulate_grad_batches) % len(self.train_dataloader)):
+            next(self.train_sampler)
 
         self.eval_losses = eval_losses
 
     def qk_loss(self, batch):
+        source = batch['question']
+        target = ['Knowledge: ' + knowledge for knowledge in batch['knowledge']]
         source_tok = self.tokenizer.batch_encode_plus(
-            batch['source'],
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
+            source,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
         target_tok = self.tokenizer.batch_encode_plus(
-            batch['target'],
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_output_len).to(self.device)
+            target,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_knowledge_len).to(self.device)
         labels = target_tok.input_ids
         labels[target_tok.attention_mask == 0] = -100
 
@@ -124,16 +155,34 @@ class Trainer:
         return loss
 
     def qa_loss(self, batch):
-        # # lowercase everything
-        # batch['question'] = [q.lower() for q in batch['question']]
-        # batch['answer'] = [a.lower() for a in batch['answer']]
-
+        source = batch['question']
+        target = batch['answer']
         source_tok = self.tokenizer.batch_encode_plus(
-            batch['question'],
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
+            source,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
         target_tok = self.tokenizer.batch_encode_plus(
-            batch['answer'],
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_output_len).to(self.device)
+            target,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
+        labels = target_tok.input_ids
+        labels[target_tok.attention_mask == 0] = -100
+
+        loss = self.model(
+            input_ids=source_tok.input_ids,
+            attention_mask=source_tok.attention_mask,
+            labels=labels,
+        ).loss
+
+        return loss
+
+    def qka_loss(self, batch):
+        source = [question + ' \\n ' + knowledge for (question, knowledge) in zip(batch['question'], batch['knowledge'])]
+        target = batch['answer']
+        source_tok = self.tokenizer.batch_encode_plus(
+            source,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len + self.args.max_knowledge_len).to(self.device)
+        target_tok = self.tokenizer.batch_encode_plus(
+            target,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
         labels = target_tok.input_ids
         labels[target_tok.attention_mask == 0] = -100
 
@@ -151,31 +200,41 @@ class Trainer:
 
         self.model.train()
         self.optimizer.zero_grad()
+        losses, qk_losses, qa_losses, qka_losses = [], [], [], []
         for _ in range(self.args.accumulate_grad_batches):
             try:
-                qk_batch = next(self.train_qk_sampler)
+                batch = next(self.train_sampler)
             except StopIteration:
-                self.train_qk_sampler = iter(self.train_qk_dataloader)
-                qk_batch = next(self.train_qk_sampler)
-            try:
-                qa_batch = next(self.train_qa_sampler)
-            except StopIteration:
-                self.train_qa_sampler = iter(self.train_qa_dataloader)
-                qa_batch = next(self.train_qa_sampler)
-            qk_loss = self.qk_loss(qk_batch)
-            qa_loss = self.qa_loss(qa_batch)
-            loss = qk_loss + qa_loss
+                self.train_sampler = iter(self.train_dataloader)
+                batch = next(self.train_sampler)
+            qk_loss = self.qk_loss(batch)
+            qa_loss = self.qa_loss(batch)
+            qka_loss = torch.tensor(0.0, device=qk_loss.device)
+            if self.args.qka_loss:
+                qka_loss = self.qka_loss(batch)
+            loss = qk_loss + qa_loss + qka_loss
+            losses.append(loss.item())
+            qk_losses.append(qk_loss.item())
+            qa_losses.append(qa_loss.item())
+            qka_losses.append(qka_loss.item())
+            loss /= self.args.accumulate_grad_batches
             loss.backward()
         self.optimizer.step()
+
+        loss = np.mean(losses)
+        qk_loss = np.mean(qk_losses)
+        qa_loss = np.mean(qa_losses)
+        qka_loss = np.mean(qka_losses)
 
         if not self.args.nosave:
             if step % self.args.log_interval == 0:
                 # self.writer.add_scalar('train/loss', loss.item(), step)
                 wandb.log({
                     'train/step': step,
-                    'train/loss': loss.item(),
-                    'train/qk_loss': qk_loss.item(),
-                    'train/qa_loss': qa_loss.item(),
+                    'train/loss': loss,
+                    'train/qk_loss': qk_loss,
+                    'train/qa_loss': qa_loss,
+                    'train/qka_loss': qka_loss,
                 })
 
     # The code in this function is adapted from Reward.get_reward() in rainier/rainier/model/reward.py
@@ -199,8 +258,8 @@ class Trainer:
             batch_choices = flattened_choices[i:j]
 
             # Tokenize prompts and inputs
-            tokenized_prompts = self.tokenizer(batch_prompts, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_input_len).to(self.device)
-            tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_output_len).to(self.device)
+            tokenized_prompts = self.tokenizer(batch_prompts, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
+            tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
             tokenized_choices_ids = tokenized_choices.input_ids
             pad_mask = (tokenized_choices_ids == self.tokenizer.pad_token_id)
 
@@ -245,6 +304,8 @@ class Trainer:
         }
 
     def eval(self, step):
+        if step == 0 and self.args.skip_init_eval:
+            return
         if step % self.args.eval_interval != 0:
             return
         if step in self.eval_losses:
@@ -254,26 +315,29 @@ class Trainer:
         losses = []
         qk_losses = []
         qa_losses = []
+        qka_losses = []
         corrects = []
         corrects_by_task = defaultdict(list)
-        for i, batch in enumerate(tqdm(self.eval_qk_dataloader)):
+        for i, batch in enumerate(tqdm(self.eval_dataloader)):
             self.model.eval()
             with torch.no_grad():
-                loss = self.qk_loss(batch)
-            qk_losses.append(loss.item())
-        for i, batch in enumerate(tqdm(self.eval_qa_dataloader)):
-            self.model.eval()
-            with torch.no_grad():
-                loss = self.qa_loss(batch)
+                qk_loss = self.qk_loss(batch)
+                qa_loss = self.qa_loss(batch)
+                qka_loss = self.qka_loss(batch)
+                loss = qk_loss + qa_loss + qka_loss
                 results = self.acc(batch)
-            qa_losses.append(loss.item())
+            losses.append(loss.item())
+            qk_losses.append(qk_loss.item())
+            qa_losses.append(qa_loss.item())
+            qka_losses.append(qka_loss.item())
             corrects += results['corrects']
             for task, c in zip(batch['task'], results['corrects']):
                 corrects_by_task[task].append(c)
 
+        loss = np.mean(losses)
         qk_loss = np.mean(qk_losses)
         qa_loss = np.mean(qa_losses)
-        loss = qk_loss + qa_loss
+        qka_loss = np.mean(qka_losses)
         acc_weighted = np.mean(corrects)
         acc_by_task = {k: np.mean(v) for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
@@ -287,6 +351,7 @@ class Trainer:
                 'eval/loss': loss,
                 'eval/qk_loss': qk_loss,
                 'eval/qa_loss': qa_loss,
+                'eval/qka_loss': qka_loss,
                 'eval/acc_weighted': acc_weighted,
                 'eval/acc_unweighted': acc_unweighted,
             }
@@ -325,8 +390,9 @@ def get_args():
     # common
     parser.add_argument('--model_type', type=str, default='t5-large', choices=['t5-large', 'allenai/unifiedqa-t5-large', 'allenai/unifiedqa-v2-t5-large-1251000'])
     parser.add_argument('--load_from_ckpt', default=None)
-    parser.add_argument('--max_input_len', type=int, default=256)
-    parser.add_argument('--max_output_len', type=int, default=32)
+    parser.add_argument('--max_question_len', type=int, default=256)
+    parser.add_argument('--max_knowledge_len', type=int, default=32)
+    parser.add_argument('--max_answer_len', type=int, default=128)
 
     # train
     parser.add_argument('--data_path', type=str, default='../data/{datapath}/{split}.tsv')
@@ -335,6 +401,7 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--accumulate_grad_batches', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-5)
+    parser.add_argument('--qka_loss', default=False, action='store_true')
 
     # other
     parser.add_argument(
@@ -344,6 +411,8 @@ def get_args():
     parser.add_argument(
         '--eval_interval', type=int, default=1000, help='step interval to do evaluation')
     parser.add_argument('--nosave', default=False, action='store_true')
+    parser.add_argument('--job_name', type=str, default=None)
+    parser.add_argument('--skip_init_eval', default=False, action='store_true')
 
     args = parser.parse_args()
     return args
@@ -362,12 +431,23 @@ def main():
         devices[i] = torch.device('cuda:' + str(i))
 
     device_map = None
-    if num_gpus == 4:  # 4x RTX6000 for T5-large
+    if num_gpus == 1:
+        device_map = None
+    elif num_gpus == 4:  # 4x RTX6000 for T5-large
         device_map = {
             0: [0, 1, 2],
             1: [3, 4, 5, 6, 7, 8, 9],
             2: [10, 11, 12, 13, 14, 15, 16],
             3: [17, 18, 19, 20, 21, 22, 23],
+        }
+    elif num_gpus == 6:
+        device_map = {
+            0: [0],
+            1: [1, 2, 3, 4],
+            2: [5, 6, 7, 8],
+            3: [9, 10, 11, 12, 13],
+            4: [14, 15, 16, 17, 18],
+            5: [19, 20, 21, 22, 23],
         }
     elif num_gpus == 8:  # 8x V100 for T5-3b
         device_map = {
@@ -392,9 +472,9 @@ def main():
             args.run_name = args.save_dir.split('/')[-1]
         else:
             time = datetime.now()
-            date_time = time.strftime('%b%d_%H-%M-%S')
+            date_time = time.strftime('%Y%m%d-%H%M%S')
             import socket
-            args.run_name = date_time + '_' + socket.gethostname()
+            args.run_name = date_time + '_' + socket.gethostname() + '_' + args.job_name
             args.save_dir = os.path.join(args.output_dir, args.run_name)
         args.model_dir = os.path.join(args.save_dir, 'model')
         args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
@@ -407,15 +487,11 @@ def main():
 
     # Load data
     log.info(f'Loading data ...')
-    train_qk_dataset = QKDataset('train', args.train_tasks)
-    eval_qk_dataset = QKDataset('dev', args.train_tasks)
-    train_qa_dataset = QADataset('train', args.train_tasks, args.data_path)
-    eval_qa_dataset = QADataset('dev', args.train_tasks, args.data_path)
+    train_dataset = QKADataset('train', args.train_tasks)
+    eval_dataset = QKADataset('dev', args.train_tasks)
     # train ds is shuffled in its constructor
-    train_qk_dataloader = DataLoader(train_qk_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QKDataset.collate_fn)
-    eval_qk_dataloader = DataLoader(eval_qk_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QKDataset.collate_fn)
-    train_qa_dataloader = DataLoader(train_qa_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QKDataset.collate_fn)
-    eval_qa_dataloader = DataLoader(eval_qa_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QKDataset.collate_fn)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QKADataset.collate_fn)
+    eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QKADataset.collate_fn)
 
     # Initialize models and optimizer
     log.info(f'Initializing models ...')
@@ -439,10 +515,8 @@ def main():
     # Set up trainer
     trainer = Trainer(
         args=args,
-        train_qk_dataloader=train_qk_dataloader,
-        eval_qk_dataloader=eval_qk_dataloader,
-        train_qa_dataloader=train_qa_dataloader,
-        eval_qa_dataloader=eval_qa_dataloader,
+        train_dataloader=train_dataloader,
+        eval_dataloader=eval_dataloader,
         tokenizer=tokenizer,
         model=model,
         optimizer=optimizer,

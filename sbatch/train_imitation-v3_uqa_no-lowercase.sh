@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_imitation-v3_uqa
+#SBATCH --job-name=train_imitation-v3_uqa_no-lowercase
 #SBATCH --partition=gpu-rtx6k
 #SBATCH --account=h2lab
 #SBATCH --nodes=1

@@ -19,6 +19,7 @@ class Reward:
                  reward_shape,
                  kl_coef,
                  ensembling,
+                 do_not_lowercase,
                  device: torch.device,
                  device_map=None,
                 ):
@@ -38,6 +39,7 @@ class Reward:
         self.reward_shape = reward_shape
         self.kl_coef = kl_coef
         self.ensembling = ensembling
+        self.do_not_lowercase = do_not_lowercase
 
         self.device = device
 
@@ -64,9 +66,10 @@ class Reward:
         assert len(questions) == len(knowledges)
         assert len(questions) == len(choicess)
 
-        questions = [a.lower() for a in questions]
-        knowledges = [a.lower() if a is not None else None for a in knowledges]
-        choicess = [[a.lower() for a in b] for b in choicess]
+        if not self.do_not_lowercase:
+            questions = [a.lower() for a in questions]
+            knowledges = [a.lower() if a is not None else None for a in knowledges]
+            choicess = [[a.lower() for a in b] for b in choicess]
         prompts = [
             question + (f' \\n {knowledge}' if knowledge is not None else '')
             for question, knowledge, choices in zip(questions, knowledges, choicess)]

@@ -20,10 +20,11 @@ log = logging.getLogger(__name__)
 
 
 class QKDataset(Dataset):
-    def __init__(self, split, tasks):
+    def __init__(self, split, tasks, ksource='gkp_gpt3curie'):
         super().__init__()
         self.split = split
         self.tasks = tasks.split(',')
+        self.ksource = ksource
 
         self.instances = self.load_datasets()
 
@@ -39,16 +40,16 @@ class QKDataset(Dataset):
     def load_datasets(self):
         ds = []
         for task in self.tasks:
-            path = f'../data/knowledge/knowledge_gkp_gpt3curie.{self.split}.{task}.json'
+            path = f'../data/{"explanation" if self.ksource == "explanation" else "knowledge"}/knowledge_{self.ksource}.{self.split}.{task}.json'
             with open(path) as f:
                 js = json.load(f)
             for item in js:
                 for k in range(len(item['knowledges'])):
                     ds.append({'source': item['query'], 'target': item['knowledges'][k]})
                     # for evaluation, only keep the first knowledge for sake of speed
-                    if split == 'eval':
+                    if self.split == 'eval':
                         break
-        print(f'{split} set size = {len(ds)}')
+        print(f'{self.split} set size = {len(ds)}')
         return ds
 
     @staticmethod
@@ -112,6 +113,7 @@ class Trainer:
 
         self.model.train()
         self.optimizer.zero_grad()
+        losses = []
         for _ in range(self.args.accumulate_grad_batches):
             try:
                 batch = next(self.train_sampler)
@@ -119,13 +121,17 @@ class Trainer:
                 self.train_sampler = iter(self.train_dataloader)
                 batch = next(self.train_sampler)
             loss = self.loss(batch)
+            losses.append(loss.item())
+            loss /= self.args.accumulate_grad_batches
             loss.backward()
         self.optimizer.step()
+
+        loss = np.mean(losses)
 
         if not self.args.nosave:
             if step % self.args.log_interval == 0:
                 # self.writer.add_scalar('train/loss', loss.item(), step)
-                wandb.log({'train/loss': loss.item(), 'train/step': step})
+                wandb.log({'train/loss': loss, 'train/step': step})
 
     def eval(self, step):
         if step % self.args.eval_interval != 0:
@@ -146,7 +152,7 @@ class Trainer:
             self.eval_losses[step] = loss
         else:
             # self.writer.add_scalar('eval/loss', loss, step)
-            wandb.log({'eval/loss': loss.item(), 'eval/step': step})
+            wandb.log({'eval/loss': loss, 'eval/step': step})
 
             prev_best_step = None if len(self.eval_losses) == 0 else min(self.eval_losses, key=self.eval_losses.get)
             self.eval_losses[step] = loss
@@ -183,6 +189,7 @@ def get_args():
     parser.add_argument('--max_output_len', type=int, default=32)
 
     # train
+    parser.add_argument('--ksource', type=str, default='gkp_gpt3curie', choices=['gkp_gpt3curie', 'explanation'])
     parser.add_argument('--train_tasks', type=str, default='obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg')
     parser.add_argument('--total_steps', type=int, default=50000)
     parser.add_argument('--batch_size', type=int, default=64)
@@ -217,12 +224,23 @@ def main():
         devices[0] = torch.device('cpu')
 
     device_map = None
-    if num_gpus == 4:  # 4x V100 for T5-large
+    if num_gpus == 1:
+        device_map = None
+    elif num_gpus == 4:  # 4x V100 for T5-large
         device_map = {
             0: [0],
             1: [1, 2, 3, 4, 5, 6, 7],
             2: [8, 9, 10, 11, 12, 13, 14, 15],
             3: [16, 17, 18, 19, 20, 21, 22, 23],
+        }
+    elif num_gpus == 6:
+        device_map = {
+            0: [0],
+            1: [1, 2, 3, 4],
+            2: [5, 6, 7, 8],
+            3: [9, 10, 11, 12, 13],
+            4: [14, 15, 16, 17, 18],
+            5: [19, 20, 21, 22, 23],
         }
     elif num_gpus == 8:  # 8x V100 for T5-3b
         device_map = {
@@ -262,8 +280,8 @@ def main():
 
     # Load data
     log.info(f'Loading data ...')
-    train_dataset = QKDataset('train', args.train_tasks)
-    eval_dataset = QKDataset('dev', args.train_tasks)
+    train_dataset = QKDataset('train', args.train_tasks, args.ksource)
+    eval_dataset = QKDataset('dev', args.train_tasks, args.ksource)
     # train ds is shuffled in its constructor
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QKDataset.collate_fn)
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QKDataset.collate_fn)

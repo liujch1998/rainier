@@ -12,9 +12,10 @@
 cat $0
 echo "--------------------"
 
-source "$CONDA_PREFIX/../../etc/profile.d/conda.sh"
-conda activate rainier_new_transformers
 cd /gscratch/xlab/liujc/rainier/rainier
+source "$CONDA_PREFIX/../../etc/profile.d/conda.sh"
+conda activate rainier2
+export LD_LIBRARY_PATH=/gscratch/xlab/liujc/anaconda3/envs/rainier2/lib:/lib64:$LD_LIBRARY_PATH
 python main.py --mode eval \
     --eval_tasks obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg \
     --load_from_ckpt ../runs_stageI/Dec08_05-15-21_g3022/model/ckp_50000.pth \
