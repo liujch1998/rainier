@@ -11,8 +11,9 @@ from tqdm import tqdm
 
 import torch
 from torch.utils.data import IterableDataset, Dataset, DataLoader
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import transformers
+from accelerate import Accelerator
 import wandb
 
 from utils.utils import ensure_dir, set_seed, reduce_mean
@@ -92,7 +93,62 @@ class QKADataset(Dataset):
 
     @staticmethod
     def collate_fn(batch):
-        return {k: [item[k] for item in batch] for k in batch[0]}
+        global tokenizer
+
+        task = [item['task'] for item in batch]
+        answer_ix = torch.tensor([item['answer_ix'] for item in batch], dtype=torch.long)
+
+        question = [item['question'] for item in batch]
+        question_tok = tokenizer.batch_encode_plus(
+            question,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_question_len)
+
+        choices = [item['choices'] for item in batch]
+        choices_tok = [tokenizer.batch_encode_plus(
+            item['choices'],
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_answer_len)
+            for item in batch]
+        choices_labels = [choice_tok.input_ids.clone() for choice_tok in choices_tok]
+        for choice_labels, choice_tok in zip(choices_labels, choices_tok):
+            choice_labels[choice_tok.attention_mask == 0] = -100
+
+        answer = [item['answer'] for item in batch]
+        answer_tok = tokenizer.batch_encode_plus(
+            answer,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_answer_len)
+        answer_labels = answer_tok.input_ids.clone()
+        answer_labels[answer_tok.attention_mask == 0] = -100
+
+        knowledge = [item['knowledge'] for item in batch]
+        knowledge_with_prefix = [f'Knowledge: {k}' for k in knowledge]
+        knowledge_with_prefix_tok = tokenizer.batch_encode_plus(
+            knowledge_with_prefix,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_knowledge_len)
+        knowledge_with_prefix_labels = knowledge_with_prefix_tok.input_ids.clone()
+        knowledge_with_prefix_labels[knowledge_with_prefix_tok.attention_mask == 0] = -100
+
+        question_knowledge = [f'{q} \\n {k}' for q, k in zip(question, knowledge)]
+        question_knowledge_tok = tokenizer.batch_encode_plus(
+            question_knowledge,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_question_len + tokenizer.max_knowledge_len)
+
+        return {
+            'task': task,
+            'answer_ix': answer_ix,
+            'question_input_ids': question_tok.input_ids,
+            'question_attention_mask': question_tok.attention_mask,
+            'choices_input_ids': [choice_tok.input_ids for choice_tok in choices_tok],
+            'choices_attention_mask': [choice_tok.attention_mask for choice_tok in choices_tok],
+            'choices_labels': choices_labels,
+            'answer_input_ids': answer_tok.input_ids,
+            'answer_attention_mask': answer_tok.attention_mask,
+            'answer_labels': answer_labels,
+            'knowledge_with_prefix_input_ids': knowledge_with_prefix_tok.input_ids,
+            'knowledge_with_prefix_attention_mask': knowledge_with_prefix_tok.attention_mask,
+            'knowledge_with_prefix_labels': knowledge_with_prefix_labels,
+            'question_knowledge_input_ids': question_knowledge_tok.input_ids,
+            'question_knowledge_attention_mask': question_knowledge_tok.attention_mask,
+        }
 
 class Trainer:
     def __init__(self,
@@ -105,6 +161,7 @@ class Trainer:
                  init_step,
                  eval_losses,
                  device,
+                 accelerator,
                 ):
         self.args = args
         self.train_dataloader = train_dataloader
@@ -114,7 +171,8 @@ class Trainer:
         self.model = model
         self.optimizer = optimizer
         self.device = device
-        if not args.nosave:
+        self.accelerator = accelerator
+        if not args.nosave and accelerator.is_main_process:
             # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
             wandb.init(project='rainier_stageI', name=args.run_name, config=args)
             wandb.define_metric('train/step')
@@ -128,26 +186,15 @@ class Trainer:
         self.eval_losses = eval_losses
 
     def qk_loss(self, batch):
-        source = batch['question']
-        target = ['Knowledge: ' + knowledge for knowledge in batch['knowledge']]
-        source_tok = self.tokenizer.batch_encode_plus(
-            source,
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
-        target_tok = self.tokenizer.batch_encode_plus(
-            target,
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_knowledge_len).to(self.device)
-        labels = target_tok.input_ids
-        labels[target_tok.attention_mask == 0] = -100
-
         logits = self.model(
-            input_ids=source_tok.input_ids,
-            attention_mask=source_tok.attention_mask,
-            labels=labels,
+            input_ids=batch['question_input_ids'],
+            attention_mask=batch['question_attention_mask'],
+            labels=batch['knowledge_with_prefix_labels'],
         ).logits # (B, L, V)
         loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
-        losses = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
-        losses = losses.view(labels.shape) # (B, L)
-        loss_mask = target_tok.attention_mask
+        losses = loss_fn(logits.view(-1, logits.size(-1)), batch['knowledge_with_prefix_labels'].view(-1))
+        losses = losses.view(batch['knowledge_with_prefix_labels'].shape) # (B, L)
+        loss_mask = batch['knowledge_with_prefix_attention_mask'].clone()
         loss_mask[:, :2] = 0 # Because "Knowledege:" is two tokens
         losses = reduce_mean(losses, loss_mask, axis=-1) # (B)
         loss = losses.mean()
@@ -155,41 +202,19 @@ class Trainer:
         return loss
 
     def qa_loss(self, batch):
-        source = batch['question']
-        target = batch['answer']
-        source_tok = self.tokenizer.batch_encode_plus(
-            source,
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
-        target_tok = self.tokenizer.batch_encode_plus(
-            target,
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
-        labels = target_tok.input_ids
-        labels[target_tok.attention_mask == 0] = -100
-
         loss = self.model(
-            input_ids=source_tok.input_ids,
-            attention_mask=source_tok.attention_mask,
-            labels=labels,
+            input_ids=batch['question_input_ids'],
+            attention_mask=batch['question_attention_mask'],
+            labels=batch['answer_labels'],
         ).loss
 
         return loss
 
     def qka_loss(self, batch):
-        source = [question + ' \\n ' + knowledge for (question, knowledge) in zip(batch['question'], batch['knowledge'])]
-        target = batch['answer']
-        source_tok = self.tokenizer.batch_encode_plus(
-            source,
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len + self.args.max_knowledge_len).to(self.device)
-        target_tok = self.tokenizer.batch_encode_plus(
-            target,
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
-        labels = target_tok.input_ids
-        labels[target_tok.attention_mask == 0] = -100
-
         loss = self.model(
-            input_ids=source_tok.input_ids,
-            attention_mask=source_tok.attention_mask,
-            labels=labels,
+            input_ids=batch['question_knowledge_input_ids'],
+            attention_mask=batch['question_knowledge_attention_mask'],
+            labels=batch['answer_labels'],
         ).loss
 
         return loss
@@ -218,7 +243,7 @@ class Trainer:
             qa_losses.append(qa_loss.item())
             qka_losses.append(qka_loss.item())
             loss /= self.args.accumulate_grad_batches
-            loss.backward()
+            self.accelerator.backward(loss)
         self.optimizer.step()
 
         loss = np.mean(losses)
@@ -226,7 +251,7 @@ class Trainer:
         qa_loss = np.mean(qa_losses)
         qka_loss = np.mean(qka_losses)
 
-        if not self.args.nosave:
+        if not self.args.nosave and self.accelerator.is_main_process:
             if step % self.args.log_interval == 0:
                 # self.writer.add_scalar('train/loss', loss.item(), step)
                 wandb.log({
@@ -239,53 +264,62 @@ class Trainer:
 
     # The code in this function is adapted from Reward.get_reward() in rainier/rainier/model/reward.py
     def acc(self, batch):
-        prompts = batch['question']
-        choicess = batch['choices']
-        answer_ixs = batch['answer_ix']
+        questions_input_ids = batch['question_input_ids'] # (B, L)
+        questions_attention_mask = batch['question_attention_mask'] # (B, L)
+        choicess_input_ids = batch['choices_input_ids'] # [(K, L)]
+        choicess_attention_mask = batch['choices_attention_mask'] # [(K, L)]
+        choicess_labels = batch['choices_labels'] # [(K, L)]
+        answer_ixs = batch['answer_ix'] # (B)
 
         # Compute number of choices for each question, and flatten prompts accordingly
-        num_ans = [len(c) for c in choicess]
-        max_ans_num = max(num_ans)
-        flattened_prompts = list(np.repeat(np.array(prompts, dtype=object), num_ans, axis=0))
-        flattened_choices = list(chain(*choicess))
+        num_ans = torch.tensor([choices_input_ids.size(0) for choices_input_ids in choicess_input_ids], device=choicess_input_ids[0].device)
+        max_ans_num = num_ans.max().item()
+        flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, num_ans, dim=0) # (B * K, L)
+        flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, num_ans, dim=0) # (B * K, L)
+        flattened_choices_input_ids = torch.cat(choicess_input_ids, dim=0) # (B * K, L)
+        flattened_choices_attention_mask = torch.cat(choicess_attention_mask, dim=0) # (B * K, L)
+        flattened_choices_labels = torch.cat(choicess_labels, dim=0) # (B * K, L)
 
         # Preallocate tensor for all of the loss
-        all_losses = torch.zeros(len(flattened_prompts), device=self.device)
+        all_losses = torch.zeros(flattened_questions_input_ids.size(0), device=self.device)
 
-        for i in range(0, len(flattened_prompts), self.args.batch_size):
-            j = min(i + self.args.batch_size, len(flattened_prompts))
-            batch_prompts = flattened_prompts[i:j]
-            batch_choices = flattened_choices[i:j]
+        for i in range(0, flattened_questions_input_ids.size(0), self.args.batch_size):
+            j = min(i + self.args.batch_size, flattened_questions_input_ids.size(0))
+            batch_questions_input_ids = flattened_questions_input_ids[i:j]
+            batch_questions_attention_mask = flattened_questions_attention_mask[i:j]
+            batch_choices_input_ids = flattened_choices_input_ids[i:j]
+            batch_choices_attention_mask = flattened_choices_attention_mask[i:j]
+            batch_choices_labels = flattened_choices_labels[i:j]
 
             # Tokenize prompts and inputs
-            tokenized_prompts = self.tokenizer(batch_prompts, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
-            tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
-            tokenized_choices_ids = tokenized_choices.input_ids
-            pad_mask = (tokenized_choices_ids == self.tokenizer.pad_token_id)
+            # tokenized_prompts = self.tokenizer(batch_prompts, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
+            # tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
+            # tokenized_choices_ids = tokenized_choices.input_ids
+            # pad_mask = (tokenized_choices_ids == self.tokenizer.pad_token_id)
 
             with torch.no_grad():
                 logits = self.model(
-                    input_ids=tokenized_prompts.input_ids,
-                    attention_mask=tokenized_prompts.attention_mask,
-                    labels=tokenized_choices_ids,
+                    input_ids=batch_questions_input_ids,
+                    attention_mask=batch_questions_attention_mask,
+                    labels=batch_choices_input_ids,
                 ).logits # (B, L, V)
 
             # Set ignore index for loss calculation
-            tokenized_choices_ids[pad_mask] = -100
+            # tokenized_choices_ids[pad_mask] = -100
 
             # Loss will be exactly 0 for ignored, pad idx tokens
             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100,reduction='none')
-            losses = loss_fct(logits.view(-1, logits.size(-1)), tokenized_choices_ids.view(-1))
+            losses = loss_fct(logits.view(-1, logits.size(-1)), batch_choices_labels.view(-1))
 
             # Take mean of loss
-            losses = losses.view(tokenized_choices_ids.shape) # (B, L)
-            losses = reduce_mean(losses, ~pad_mask, axis=-1) # (B)
+            losses = losses.view(batch_choices_labels.shape) # (B, L)
+            losses = reduce_mean(losses, batch_choices_attention_mask, axis=-1) # (B)
 
             # Update all loss
             all_losses[i:j] = losses
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logits = torch.empty(len(prompts), max_ans_num, device=self.device).fill_(float('-inf'))
+        answer_logits = torch.empty(questions_input_ids.size(0), max_ans_num, device=self.device).fill_(float('-inf'))
         cur_arr_idx = 0
         for idx, sz in enumerate(num_ans):
             answer_logits[idx, :sz] = -all_losses[cur_arr_idx:cur_arr_idx+sz]
@@ -293,8 +327,8 @@ class Trainer:
         answer_probs = answer_logits.softmax(axis=1)
 
         # Compute accuracy from argmax answer
-        preds = answer_probs.argmax(axis=1).detach().cpu()
-        corrects = (preds == torch.tensor(answer_ixs)).tolist()
+        preds = answer_probs.argmax(axis=1)
+        corrects = (preds == answer_ixs).tolist()
 
         return {
             'corrects': corrects,
@@ -342,9 +376,7 @@ class Trainer:
         acc_by_task = {k: np.mean(v) for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
 
-        if self.args.nosave:
-            self.eval_losses[step] = qk_loss
-        else:
+        if not self.args.nosave and self.accelerator.is_main_process:
             # self.writer.add_scalar('eval/loss', loss, step)
             stats = {
                 'eval/step': step,
@@ -369,6 +401,8 @@ class Trainer:
                         log.warning(f'Cannot remove previous best ckpt!')
                 self.save(step, last=False)
                 log.info(f'Best ckpt updated to [step {step}]')
+        else:
+            self.eval_losses[step] = qk_loss
 
     def save(self, step, last=True):
         if self.args.nosave:
@@ -388,7 +422,7 @@ def get_args():
     parser = argparse.ArgumentParser()
 
     # common
-    parser.add_argument('--model_type', type=str, default='t5-large', choices=['t5-large', 'allenai/unifiedqa-t5-large', 'allenai/unifiedqa-v2-t5-large-1251000'])
+    parser.add_argument('--model_type', type=str, default='t5-large', choices=['t5-large', 'allenai/unifiedqa-t5-large', 'allenai/unifiedqa-t5-11b', 'allenai/unifiedqa-v2-t5-large-1251000'])
     parser.add_argument('--load_from_ckpt', default=None)
     parser.add_argument('--max_question_len', type=int, default=256)
     parser.add_argument('--max_knowledge_len', type=int, default=32)
@@ -423,6 +457,9 @@ def main():
     set_seed()
 
     # GPUs
+    accelerator = Accelerator()
+    device = accelerator.device
+    '''
     assert torch.cuda.is_available(), 'CUDA is not available'
     num_gpus = torch.cuda.device_count()
     log.info(f'Detected {num_gpus} GPUS')
@@ -463,6 +500,7 @@ def main():
     else:
         log.error('Invalid number of GPUs!')
         exit(-1)
+    '''
 
     # Set up save directories
     if not args.nosave:
@@ -495,22 +533,29 @@ def main():
 
     # Initialize models and optimizer
     log.info(f'Initializing models ...')
+    global tokenizer
     tokenizer = transformers.T5Tokenizer.from_pretrained(args.model_type)
+    tokenizer.max_question_len = args.max_question_len
+    tokenizer.max_answer_len = args.max_answer_len
+    tokenizer.max_knowledge_len = args.max_knowledge_len
     model = transformers.T5ForConditionalGeneration.from_pretrained(args.model_type)
-    model.to(devices[0])
-    model.parallelize(device_map=device_map)
+    model.to(device)
+    # model.parallelize(device_map=device_map)
+    model = accelerator.prepare(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     init_step = 0
     eval_losses = {}
 
     # Load from checkpoint if continue training
     if args.load_from_ckpt is not None:
-        checkpoint = torch.load(args.load_from_ckpt)
+        checkpoint = torch.load(args.load_from_ckpt, map_location=torch.device('cpu'))
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         init_step = checkpoint['step']
         eval_losses = checkpoint['eval_losses']
         checkpoint.clear()
+
+    optimizer, train_dataloader, eval_dataloader = accelerator.prepare(optimizer, train_dataloader, eval_dataloader)
 
     # Set up trainer
     trainer = Trainer(
@@ -522,7 +567,8 @@ def main():
         optimizer=optimizer,
         init_step=init_step,
         eval_losses=eval_losses,
-        device=devices[0],
+        device=device,
+        accelerator=accelerator,
     )
 
     # Train

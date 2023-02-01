@@ -79,7 +79,7 @@ def flatten_dict(nested, sep='.'):
 
 def ensure_dir(d):
     if not os.path.exists(d):
-        os.makedirs(d)
+        os.makedirs(d, exist_ok=True)
 
 
 def batchify(data: Iterable[T], batch_size: int) -> Iterable[List[T]]:
