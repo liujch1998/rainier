@@ -1,19 +1,20 @@
 import argparse
 from collections import defaultdict
-from datetime import datetime
+import datetime
 from itertools import chain
 import json
 import logging
 import numpy as np
 import os
 import random
+import shutil
 from tqdm import tqdm
 
 import torch
 from torch.utils.data import IterableDataset, Dataset, DataLoader
 # from torch.utils.tensorboard import SummaryWriter
 import transformers
-from accelerate import Accelerator
+import accelerate
 import wandb
 
 from utils.utils import ensure_dir, set_seed, reduce_mean
@@ -98,56 +99,68 @@ class QKADataset(Dataset):
         task = [item['task'] for item in batch]
         answer_ix = torch.tensor([item['answer_ix'] for item in batch], dtype=torch.long)
 
-        question = [item['question'] for item in batch]
-        question_tok = tokenizer.batch_encode_plus(
-            question,
+        questions = [item['question'] for item in batch]
+        questions_tok = tokenizer.batch_encode_plus(
+            questions,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_question_len)
+        questions_input_ids = questions_tok.input_ids
+        questions_attention_mask = questions_tok.attention_mask
 
-        choices = [item['choices'] for item in batch]
-        choices_tok = [tokenizer.batch_encode_plus(
-            item['choices'],
+        padded_choicess = [item['choices'] + [''] * (8 - len(item['choices'])) for item in batch]
+        choicess_tok = [tokenizer.batch_encode_plus(
+            padded_choices,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_answer_len)
-            for item in batch]
-        choices_labels = [choice_tok.input_ids.clone() for choice_tok in choices_tok]
-        for choice_labels, choice_tok in zip(choices_labels, choices_tok):
-            choice_labels[choice_tok.attention_mask == 0] = -100
+            for padded_choices in padded_choicess]
+        choicess_input_ids = torch.stack([choices_tok.input_ids for choices_tok in choicess_tok], dim=0)
+        choicess_attention_mask = torch.stack([choices_tok.attention_mask for choices_tok in choicess_tok], dim=0)
+        choicess_labels = choicess_input_ids.clone()
+        choicess_labels[choicess_attention_mask == 0] = -100
+        # choices_labels = [choice_tok.input_ids.clone() for choice_tok in choices_tok]
+        # for choice_labels, choice_tok in zip(choices_labels, choices_tok):
+        #     choice_labels[choice_tok.attention_mask == 0] = -100
 
-        answer = [item['answer'] for item in batch]
-        answer_tok = tokenizer.batch_encode_plus(
-            answer,
+        answers = [item['answer'] for item in batch]
+        answers_tok = tokenizer.batch_encode_plus(
+            answers,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_answer_len)
-        answer_labels = answer_tok.input_ids.clone()
-        answer_labels[answer_tok.attention_mask == 0] = -100
+        answers_input_ids = answers_tok.input_ids
+        answers_attention_mask = answers_tok.attention_mask
+        answers_labels = answers_input_ids.clone()
+        answers_labels[answers_attention_mask == 0] = -100
 
-        knowledge = [item['knowledge'] for item in batch]
-        knowledge_with_prefix = [f'Knowledge: {k}' for k in knowledge]
-        knowledge_with_prefix_tok = tokenizer.batch_encode_plus(
-            knowledge_with_prefix,
+        knowledges = [item['knowledge'] for item in batch]
+        knowledges_with_prefix = [f'Knowledge: {k}' for k in knowledges]
+        knowledges_with_prefix_tok = tokenizer.batch_encode_plus(
+            knowledges_with_prefix,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_knowledge_len)
-        knowledge_with_prefix_labels = knowledge_with_prefix_tok.input_ids.clone()
-        knowledge_with_prefix_labels[knowledge_with_prefix_tok.attention_mask == 0] = -100
+        knowledges_with_prefix_input_ids = knowledges_with_prefix_tok.input_ids
+        knowledges_with_prefix_attention_mask = knowledges_with_prefix_tok.attention_mask
+        knowledges_with_prefix_labels = knowledges_with_prefix_input_ids.clone()
+        knowledges_with_prefix_labels[knowledges_with_prefix_attention_mask == 0] = -100
 
-        question_knowledge = [f'{q} \\n {k}' for q, k in zip(question, knowledge)]
-        question_knowledge_tok = tokenizer.batch_encode_plus(
-            question_knowledge,
+        questions_knowledges = [f'{q} \\n {k}' for q, k in zip(questions, knowledges)]
+        questions_knowledges_tok = tokenizer.batch_encode_plus(
+            questions_knowledges,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=tokenizer.max_question_len + tokenizer.max_knowledge_len)
+        questions_knowledges_input_ids = questions_knowledges_tok.input_ids
+        questions_knowledges_attention_mask = questions_knowledges_tok.attention_mask
 
         return {
             'task': task,
             'answer_ix': answer_ix,
-            'question_input_ids': question_tok.input_ids,
-            'question_attention_mask': question_tok.attention_mask,
-            'choices_input_ids': [choice_tok.input_ids for choice_tok in choices_tok],
-            'choices_attention_mask': [choice_tok.attention_mask for choice_tok in choices_tok],
-            'choices_labels': choices_labels,
-            'answer_input_ids': answer_tok.input_ids,
-            'answer_attention_mask': answer_tok.attention_mask,
-            'answer_labels': answer_labels,
-            'knowledge_with_prefix_input_ids': knowledge_with_prefix_tok.input_ids,
-            'knowledge_with_prefix_attention_mask': knowledge_with_prefix_tok.attention_mask,
-            'knowledge_with_prefix_labels': knowledge_with_prefix_labels,
-            'question_knowledge_input_ids': question_knowledge_tok.input_ids,
-            'question_knowledge_attention_mask': question_knowledge_tok.attention_mask,
+            'question_input_ids': questions_input_ids,
+            'question_attention_mask': questions_attention_mask,
+            'choices_input_ids': choicess_input_ids,
+            'choices_attention_mask': choicess_attention_mask,
+            'choices_labels': choicess_labels,
+            # 'answers_input_ids': answers_tok.input_ids,
+            # 'answers_attention_mask': answers_tok.attention_mask,
+            'answer_labels': answers_labels,
+            'knowledge_with_prefix_input_ids': knowledges_with_prefix_input_ids,
+            'knowledge_with_prefix_attention_mask': knowledges_with_prefix_attention_mask,
+            'knowledge_with_prefix_labels': knowledges_with_prefix_labels,
+            'question_knowledge_input_ids': questions_knowledges_input_ids,
+            'question_knowledge_attention_mask': questions_knowledges_attention_mask,
         }
 
 class Trainer:
@@ -172,7 +185,7 @@ class Trainer:
         self.optimizer = optimizer
         self.device = device
         self.accelerator = accelerator
-        if not args.nosave and accelerator.is_main_process:
+        if not self.args.nosave and self.accelerator.is_main_process:
             # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
             wandb.init(project='rainier_stageI', name=args.run_name, config=args)
             wandb.define_metric('train/step')
@@ -220,9 +233,10 @@ class Trainer:
         return loss
 
     def train(self, step):
-        self.eval(step=step)
         self.save(step=step)
+        self.eval(step=step)
 
+        accelerate.utils.wait_for_everyone()
         self.model.train()
         self.optimizer.zero_grad()
         losses, qk_losses, qa_losses, qka_losses = [], [], [], []
@@ -244,6 +258,7 @@ class Trainer:
             qka_losses.append(qka_loss.item())
             loss /= self.args.accumulate_grad_batches
             self.accelerator.backward(loss)
+            # print(f'loss: {loss.item():.4f}, qk_loss: {qk_loss.item():.4f}, qa_loss: {qa_loss.item():.4f}, qka_loss: {qka_loss.item():.4f}')
         self.optimizer.step()
 
         loss = np.mean(losses)
@@ -266,19 +281,20 @@ class Trainer:
     def acc(self, batch):
         questions_input_ids = batch['question_input_ids'] # (B, L)
         questions_attention_mask = batch['question_attention_mask'] # (B, L)
-        choicess_input_ids = batch['choices_input_ids'] # [(K, L)]
-        choicess_attention_mask = batch['choices_attention_mask'] # [(K, L)]
-        choicess_labels = batch['choices_labels'] # [(K, L)]
+        choicess_input_ids = batch['choices_input_ids'] # (B, K, L)
+        choicess_attention_mask = batch['choices_attention_mask'] # (B, K, L)
+        choicess_labels = batch['choices_labels'] # (B, K, L)
         answer_ixs = batch['answer_ix'] # (B)
 
         # Compute number of choices for each question, and flatten prompts accordingly
         num_ans = torch.tensor([choices_input_ids.size(0) for choices_input_ids in choicess_input_ids], device=choicess_input_ids[0].device)
         max_ans_num = num_ans.max().item()
-        flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, num_ans, dim=0) # (B * K, L)
-        flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, num_ans, dim=0) # (B * K, L)
-        flattened_choices_input_ids = torch.cat(choicess_input_ids, dim=0) # (B * K, L)
-        flattened_choices_attention_mask = torch.cat(choicess_attention_mask, dim=0) # (B * K, L)
-        flattened_choices_labels = torch.cat(choicess_labels, dim=0) # (B * K, L)
+        flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, 8, dim=0) # (B * K, L)
+        flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, 8, dim=0) # (B * K, L)
+        flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * K, L)
+        flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * K, L)
+        flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * K, L)
+        # print(questions_input_ids.size(), choicess_labels.size())
 
         # Preallocate tensor for all of the loss
         all_losses = torch.zeros(flattened_questions_input_ids.size(0), device=self.device)
@@ -297,12 +313,12 @@ class Trainer:
             # tokenized_choices_ids = tokenized_choices.input_ids
             # pad_mask = (tokenized_choices_ids == self.tokenizer.pad_token_id)
 
-            with torch.no_grad():
-                logits = self.model(
-                    input_ids=batch_questions_input_ids,
-                    attention_mask=batch_questions_attention_mask,
-                    labels=batch_choices_input_ids,
-                ).logits # (B, L, V)
+            # print(batch_questions_input_ids.size(), batch_questions_attention_mask.size(), batch_choices_input_ids.size())
+            logits = self.model(
+                input_ids=batch_questions_input_ids,
+                attention_mask=batch_questions_attention_mask,
+                labels=batch_choices_input_ids,
+            ).logits # (B, L, V)
 
             # Set ignore index for loss calculation
             # tokenized_choices_ids[pad_mask] = -100
@@ -319,11 +335,11 @@ class Trainer:
             all_losses[i:j] = losses
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logits = torch.empty(questions_input_ids.size(0), max_ans_num, device=self.device).fill_(float('-inf'))
+        answer_logits = torch.empty(questions_input_ids.size(0), 8, device=self.device).fill_(float('-inf'))
         cur_arr_idx = 0
         for idx, sz in enumerate(num_ans):
             answer_logits[idx, :sz] = -all_losses[cur_arr_idx:cur_arr_idx+sz]
-            cur_arr_idx += sz
+            cur_arr_idx += 8
         answer_probs = answer_logits.softmax(axis=1)
 
         # Compute accuracy from argmax answer
@@ -346,27 +362,34 @@ class Trainer:
             return
         log.info(f'Evaluating [step {step}] ...')
 
-        losses = []
-        qk_losses = []
-        qa_losses = []
-        qka_losses = []
-        corrects = []
-        corrects_by_task = defaultdict(list)
-        for i, batch in enumerate(tqdm(self.eval_dataloader)):
-            self.model.eval()
-            with torch.no_grad():
+        accelerate.utils.wait_for_everyone()
+        self.model.eval()
+
+        with torch.no_grad():
+            losses = []
+            qk_losses = []
+            qa_losses = []
+            qka_losses = []
+            corrects = []
+            corrects_by_task = defaultdict(list)
+            for i, batch in enumerate(tqdm(self.eval_dataloader)):
+                # if i == 10 + torch.distributed.get_rank():
+                # if i == 50:
+                #     break
                 qk_loss = self.qk_loss(batch)
                 qa_loss = self.qa_loss(batch)
                 qka_loss = self.qka_loss(batch)
                 loss = qk_loss + qa_loss + qka_loss
                 results = self.acc(batch)
-            losses.append(loss.item())
-            qk_losses.append(qk_loss.item())
-            qa_losses.append(qa_loss.item())
-            qka_losses.append(qka_loss.item())
-            corrects += results['corrects']
-            for task, c in zip(batch['task'], results['corrects']):
-                corrects_by_task[task].append(c)
+                losses.append(loss.item())
+                qk_losses.append(qk_loss.item())
+                qa_losses.append(qa_loss.item())
+                qka_losses.append(qka_loss.item())
+                corrects += results['corrects']
+                for task, c in zip(batch['task'], results['corrects']):
+                    corrects_by_task[task].append(c)
+            # accelerate.utils.wait_for_everyone()
+                # torch.distributed.barrier()
 
         loss = np.mean(losses)
         qk_loss = np.mean(qk_losses)
@@ -399,23 +422,28 @@ class Trainer:
                         os.remove(f'{self.args.model_dir}/ckp_{prev_best_step}.pth')
                     except:
                         log.warning(f'Cannot remove previous best ckpt!')
-                self.save(step, last=False)
+                shutil.copy(f'{self.args.model_dir}/last.pth', f'{self.args.model_dir}/ckp_{step}.pth')
                 log.info(f'Best ckpt updated to [step {step}]')
         else:
             self.eval_losses[step] = qk_loss
 
-    def save(self, step, last=True):
+    def save(self, step):
         if self.args.nosave:
             return
         if step % self.args.save_interval != 0:
             return
         # this will overwrite an existing ckpt with the save filename!
+        accelerate.utils.wait_for_everyone()
+        model_state_dict = self.model.state_dict() # so that the parameters are synced across GPUs
+        optimizer_state_dict = self.optimizer.state_dict()
+        if not self.accelerator.is_main_process:
+            return
         torch.save({
-            'model': self.model.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
+            'model': model_state_dict,
+            'optimizer': optimizer_state_dict,
             'step': step,
             'eval_losses': self.eval_losses,
-        }, f'{self.args.model_dir}/{"last" if last else "ckp_" + str(step)}.pth')
+        }, f'{self.args.model_dir}/last.pth')
         log.info(f'[step {step}] model checkpoint saved')
 
 def get_args():
@@ -457,7 +485,7 @@ def main():
     set_seed()
 
     # GPUs
-    accelerator = Accelerator()
+    accelerator = accelerate.Accelerator()
     device = accelerator.device
     '''
     assert torch.cuda.is_available(), 'CUDA is not available'
@@ -509,7 +537,7 @@ def main():
             args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
             args.run_name = args.save_dir.split('/')[-1]
         else:
-            time = datetime.now()
+            time = datetime.datetime.now()
             date_time = time.strftime('%Y%m%d-%H%M%S')
             import socket
             args.run_name = date_time + '_' + socket.gethostname() + '_' + args.job_name
@@ -556,6 +584,7 @@ def main():
         checkpoint.clear()
 
     optimizer, train_dataloader, eval_dataloader = accelerator.prepare(optimizer, train_dataloader, eval_dataloader)
+    # print(f'Rank {torch.distributed.get_rank()}, eval_dataloader_len: {len(eval_dataloader)}')
 
     # Set up trainer
     trainer = Trainer(
