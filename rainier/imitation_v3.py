@@ -63,7 +63,7 @@ class QKADataset(Dataset):
             return choices
 
         ds = []
-        for task in self.tasks:
+        for task_ix, task in enumerate(self.tasks):
             path = f'../data/knowledge/knowledge_gkp_gpt3curie.{self.split}.{task}.json'
             with open(path) as f:
                 js = json.load(f)
@@ -79,6 +79,7 @@ class QKADataset(Dataset):
                 for k in range(len(item['knowledges'])):
                     ds.append({
                         'task': task,
+                        'task_ix': task_ix,
                         'question': q,
                         'choices': choices,
                         'answer': a,
@@ -96,7 +97,8 @@ class QKADataset(Dataset):
     def collate_fn(batch):
         global tokenizer
 
-        task = [item['task'] for item in batch]
+        # task = [item['task'] for item in batch]
+        task_ix = torch.tensor([item['task_ix'] for item in batch], dtype=torch.long)
         answer_ix = torch.tensor([item['answer_ix'] for item in batch], dtype=torch.long)
 
         questions = [item['question'] for item in batch]
@@ -146,7 +148,7 @@ class QKADataset(Dataset):
         questions_knowledges_attention_mask = questions_knowledges_tok.attention_mask
 
         return {
-            'task': task,
+            'task_ix': task_ix,
             'answer_ix': answer_ix,
             'question_input_ids': questions_input_ids,
             'question_attention_mask': questions_attention_mask,
@@ -252,20 +254,31 @@ class Trainer:
             if self.args.qka_loss:
                 qka_loss = self.qka_loss(batch)
             loss = qk_loss + qa_loss + qka_loss
-            losses.append(loss.item())
-            qk_losses.append(qk_loss.item())
-            qa_losses.append(qa_loss.item())
-            qka_losses.append(qka_loss.item())
+            losses.append(loss)
+            qk_losses.append(qk_loss)
+            qa_losses.append(qa_loss)
+            qka_losses.append(qka_loss)
             loss /= self.args.accumulate_grad_batches
             self.accelerator.backward(loss)
             # print(f'loss: {loss.item():.4f}, qk_loss: {qk_loss.item():.4f}, qa_loss: {qa_loss.item():.4f}, qka_loss: {qka_loss.item():.4f}')
         self.optimizer.step()
 
-        loss = np.mean(losses)
-        qk_loss = np.mean(qk_losses)
-        qa_loss = np.mean(qa_losses)
-        qka_loss = np.mean(qka_losses)
+        loss = torch.stack(losses).mean(dim=0, keepdim=True) # (1)
+        qk_loss = torch.stack(qk_losses).mean(dim=0, keepdim=True) # (1)
+        qa_loss = torch.stack(qa_losses).mean(dim=0, keepdim=True) # (1)
+        qka_loss = torch.stack(qka_losses).mean(dim=0, keepdim=True) # (1)
 
+        losses = self.accelerator.gather(loss) # (num_gpus)
+        qk_losses = self.accelerator.gather(qk_loss) # (num_gpus)
+        qa_losses = self.accelerator.gather(qa_loss) # (num_gpus)
+        qka_losses = self.accelerator.gather(qka_loss) # (num_gpus)
+
+        loss = losses.mean().item()
+        qk_loss = qk_losses.mean().item()
+        qa_loss = qa_losses.mean().item()
+        qka_loss = qka_losses.mean().item()
+
+        # print(f'Train loss: {loss:.4f} (qk: {qk_loss:.4f}, qa: {qa_loss:.4f}, qka: {qka_loss:.4f})')
         if not self.args.nosave and self.accelerator.is_main_process:
             if step % self.args.log_interval == 0:
                 # self.writer.add_scalar('train/loss', loss.item(), step)
@@ -344,13 +357,13 @@ class Trainer:
 
         # Compute accuracy from argmax answer
         preds = answer_probs.argmax(axis=1)
-        corrects = (preds == answer_ixs).tolist()
+        corrects = (preds == answer_ixs)
 
         return {
             'corrects': corrects,
             'preds': preds,
-            'answer_logits': answer_logits.detach().cpu(),
-            'answer_probs': answer_probs.detach().cpu(),
+            'answer_logits': answer_logits,
+            'answer_probs': answer_probs,
         }
 
     def eval(self, step):
@@ -366,14 +379,13 @@ class Trainer:
         self.model.eval()
 
         with torch.no_grad():
-            losses = []
-            qk_losses = []
-            qa_losses = []
-            qka_losses = []
-            corrects = []
-            corrects_by_task = defaultdict(list)
+            losses, qk_losses, qa_losses, qka_losses = [], [], [], []
+            corrects, task_ixs = [], []
             for i, batch in enumerate(tqdm(self.eval_dataloader)):
                 # if i == 10 + torch.distributed.get_rank():
+                #     break
+                # if i == 10:
+                #     break
                 # if i == 50:
                 #     break
                 qk_loss = self.qk_loss(batch)
@@ -381,24 +393,59 @@ class Trainer:
                 qka_loss = self.qka_loss(batch)
                 loss = qk_loss + qa_loss + qka_loss
                 results = self.acc(batch)
-                losses.append(loss.item())
-                qk_losses.append(qk_loss.item())
-                qa_losses.append(qa_loss.item())
-                qka_losses.append(qka_loss.item())
-                corrects += results['corrects']
-                for task, c in zip(batch['task'], results['corrects']):
-                    corrects_by_task[task].append(c)
+                losses.append(loss)
+                qk_losses.append(qk_loss)
+                qa_losses.append(qa_loss)
+                qka_losses.append(qka_loss)
+                corrects.append(results['corrects'])
+                task_ixs.append(batch['task_ix'])
+                # for task, c in zip(batch['task'], results['corrects']):
+                #     corrects_by_task[task].append(c)
             # accelerate.utils.wait_for_everyone()
                 # torch.distributed.barrier()
 
-        loss = np.mean(losses)
-        qk_loss = np.mean(qk_losses)
-        qa_loss = np.mean(qa_losses)
-        qka_loss = np.mean(qka_losses)
-        acc_weighted = np.mean(corrects)
-        acc_by_task = {k: np.mean(v) for k, v in corrects_by_task.items()}
+        loss = torch.stack(losses).mean(dim=0, keepdim=True) # (1)
+        qk_loss = torch.stack(qk_losses).mean(dim=0, keepdim=True) # (1)
+        qa_loss = torch.stack(qa_losses).mean(dim=0, keepdim=True) # (1)
+        qka_loss = torch.stack(qka_losses).mean(dim=0, keepdim=True) # (1)
+        corrects = torch.cat(corrects, dim=0) # (N)
+        task_ixs = torch.cat(task_ixs, dim=0) # (N)
+        # corrects_by_task = {k: torch.stack(v, dim=0) for k, v in corrects_by_task.items()}
+
+        # loss = loss.item()
+        # qk_loss = qk_loss.item()
+        # qa_loss = qa_loss.item()
+        # qka_loss = qka_loss.item()
+        # acc_weighted = corrects.float().mean().item()
+        # acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
+        # acc_unweighted = np.mean(list(acc_by_task.values()))
+
+        losses = self.accelerator.gather(loss) # (num_gpus)
+        qk_losses = self.accelerator.gather(qk_loss) # (num_gpus)
+        qa_losses = self.accelerator.gather(qa_loss) # (num_gpus)
+        qka_losses = self.accelerator.gather(qka_loss) # (num_gpus)
+        corrects = self.accelerator.gather(corrects) # (num_gpus * N)
+        task_ixs = self.accelerator.gather(task_ixs) # (num_gpus * N)
+        # corrects_by_task = self.accelerator.gather(corrects_by_task)
+
+        # Accelerator may pad the tensors to make them divisible by the total batch size
+        corrects = corrects[:len(self.eval_dataloader.dataset)]
+        task_ixs = task_ixs[:len(self.eval_dataloader.dataset)]
+        
+        loss = losses.mean().item()
+        qk_loss = qk_losses.mean().item()
+        qa_loss = qa_losses.mean().item()
+        qka_loss = qka_losses.mean().item()
+        acc_weighted = corrects.float().mean().item()
+        corrects_by_task = defaultdict(list)
+        for task_ix, correct in zip(task_ixs, corrects):
+            task = self.eval_dataloader.dataset.tasks[task_ix]
+            corrects_by_task[task].append(correct)
+        corrects_by_task = {k: torch.stack(v, dim=0) for k, v in corrects_by_task.items()}
+        acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
 
+        # print(f'Eval loss: {loss:.4f} (qk: {qk_loss:.4f}, qa: {qa_loss:.4f}, qka: {qka_loss:.4f})')
         if not self.args.nosave and self.accelerator.is_main_process:
             # self.writer.add_scalar('eval/loss', loss, step)
             stats = {
