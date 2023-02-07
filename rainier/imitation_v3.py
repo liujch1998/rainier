@@ -578,7 +578,7 @@ def main():
     '''
 
     # Set up save directories
-    if not args.nosave:
+    if not args.nosave and accelerator.is_main_process:
         args.output_dir = '../runs_stageI/'
         if args.load_from_ckpt is not None:
             args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
@@ -614,7 +614,7 @@ def main():
     tokenizer.max_answer_len = args.max_answer_len
     tokenizer.max_knowledge_len = args.max_knowledge_len
     model = transformers.T5ForConditionalGeneration.from_pretrained(args.model_type)
-    model.to(device)
+    # model.to(device)
     # model.parallelize(device_map=device_map)
     model = accelerator.prepare(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
