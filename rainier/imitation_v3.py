@@ -3,7 +3,6 @@ from collections import defaultdict
 import datetime
 from itertools import chain
 import json
-import logging
 import numpy as np
 import os
 import random
@@ -18,8 +17,7 @@ import wandb
 
 from utils.utils import ensure_dir, set_seed, reduce_mean
 
-logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'))
-log = logging.getLogger(__name__)
+log = accelerate.logging.get_logger(__name__, level='INFO')
 
 
 class QKADataset(Dataset):
@@ -314,11 +312,11 @@ class Trainer:
             ).logits # (B, L, V)
 
             # Loss will be exactly 0 for ignored, pad idx tokens
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100,reduction='none')
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
             losses = loss_fct(logits.view(-1, logits.size(-1)), batch_choices_labels.view(-1))
 
             # Take mean of loss
-            losses = losses.view(batch_choices_labels.shape) # (B, L)
+            losses = losses.view(batch_choices_labels.size()) # (B, L)
             losses = reduce_mean(losses, batch_choices_attention_mask, axis=-1) # (B)
 
             # Update all loss

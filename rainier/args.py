@@ -35,9 +35,11 @@ def get_args():
     parser.add_argument(
         '--policy_reward_sharing', action='store_true', default=False)
     parser.add_argument(
-        '--max_input_len', type=int, default=256, help='max length of the input prompt')
+        '--max_question_len', type=int, default=256, help='max length of the input prompt')
     parser.add_argument(
-        '--max_output_len', type=int, default=32, help='max length of the output knowledge')
+        '--max_answer_len', type=int, default=128, help='max length of the answer')
+    parser.add_argument(
+        '--max_knowledge_len', type=int, default=32, help='max length of the output knowledge')
     parser.add_argument(
         '--load_from_ckpt', type=str, default=None, help='ckpt path to resume training or run eval')
     parser.add_argument(
@@ -108,12 +110,15 @@ def get_args():
         '--eval_interval', type=int, default=500, help='step interval to do evaluation')
     parser.add_argument(
         '--nosave', default=False, action='store_true')
+    parser.add_argument('--job_name', type=str, default=None)
+    parser.add_argument(
+        '--eval_loop_cap', type=int, default=None, help='cap on number of eval loops')
+
     parser.add_argument(
         '--eval_baseline', action='store_true', help='whether to evaluate the no-knowledge baseline')
     parser.add_argument(
         '--cuda_deterministic', action='store_false', default=True,
         help='sets flags for determinism when using CUDA (potentially slow!)')
-
     args = parser.parse_args()
 
     return args

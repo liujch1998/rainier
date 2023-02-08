@@ -1,5 +1,4 @@
 import torch
-from transformers import T5Tokenizer
 from model.t5 import T5ForTokenRegression
 from utils.utils import mask_pad
 
@@ -10,51 +9,42 @@ class Value:
                  model_type,
                  model_ckpt,
                  model,
-                 device: torch.device,
-                 device_map=None,
+                 tokenizer,
+                 device,
+                 accelerator,
                 ):
-        self.tokenizer = T5Tokenizer.from_pretrained(model_type)
+        self.tokenizer = tokenizer
+        self.device = device
+        self.accelerator = accelerator
 
         if model is not None:
             self.model = model
-            self.device = device
             return
 
         self.model = T5ForTokenRegression.from_pretrained(model_type)
+        self.model.config.pad_token_id = tokenizer.pad_token_id
         if model_ckpt is not None:
-            checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
+            checkpoint = torch.load(model_ckpt, map_location='cpu')
             self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
+        self.model = self.accelerator.prepare(self.model)
         self.model.eval()
-        self.model.to(device)
-        self.model.encoder.parallelize(device_map=device_map)
-        self.model.decoder.parallelize(device_map=device_map)
-        self.model.model_parallel = True
-
-        self.model.config.pad_token_id = self.tokenizer.pad_token_id
-        self.device = device
 
     def forward_pass(self,
-                     query_input_ids: torch.Tensor,
-                     query_mask: torch.Tensor,
-                     response_input_ids: torch.Tensor,
-                     response_mask: torch.Tensor,
+                     questions_input_ids: torch.Tensor, # (B, QL)
+                     questions_attention_mask: torch.Tensor, # (B, QL)
+                     knowledges_input_ids: torch.Tensor, # (B, KL)
+                     knowledges_attention_mask: torch.Tensor, # (B, KL)
                     ):
 
-        query_input_ids = query_input_ids.to(self.device)
-        query_mask = query_mask.to(self.device)
-        response_input_ids = response_input_ids.to(self.device)
-        response_mask = response_mask.to(self.device)
-
-        outputs = self.model.forward_cls(
-            input_ids=query_input_ids,
-            attention_mask=query_mask,
-            labels=mask_pad(response_input_ids, response_mask, -100),
+        outputs = self.model.module.forward_cls(
+            input_ids=questions_input_ids,
+            attention_mask=questions_attention_mask,
+            labels=mask_pad(knowledges_input_ids, knowledges_attention_mask, -100),
             return_dict=True,
             output_attentions=False,
             output_hidden_states=False,
         )
         return {
-            'response/value': mask_pad(outputs.logits, response_mask)
+            'knowledges_value': mask_pad(outputs.logits, knowledges_attention_mask), # (B, KL)
         }
-

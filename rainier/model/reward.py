@@ -1,10 +1,9 @@
 import json
 import os
 from typing import Optional, List, Iterable, Dict, Any, Tuple
-from itertools import chain
-import numpy as np
 import torch
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+import torch.nn.functional as F
+from transformers import T5ForConditionalGeneration
 from utils.utils import reduce_mean
 
 
@@ -14,36 +13,33 @@ class Reward:
                  model_type,
                  model_ckpt,
                  model,
-                 max_input_len,
+                 tokenizer,
                  batch_size,
                  reward_shape,
                  kl_coef,
                  ensembling,
                  do_not_lowercase,
-                 device: torch.device,
-                 device_map=None,
+                 device,
+                 accelerator,
                 ):
-        self.tokenizer = T5Tokenizer.from_pretrained(model_type)
-
-        if model is not None:
-            self.inference_model = model
-        else:
-            self.inference_model = T5ForConditionalGeneration.from_pretrained(model_ckpt if model_ckpt is not None else model_type)
-            self.inference_model.eval()
-            self.inference_model.to(device)
-            self.inference_model.parallelize(device_map=device_map)
-
-        self.gain, self.bias = None, None
-        self.max_input_len = max_input_len
+        self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.reward_shape = reward_shape
         self.kl_coef = kl_coef
         self.ensembling = ensembling
         self.do_not_lowercase = do_not_lowercase
-
         self.device = device
+        self.accelerator = accelerator
 
-        self.loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100,reduction='none')
+        self.gain, self.bias = None, None
+
+        if model is not None:
+            self.model = model
+            return
+
+        self.model = T5ForConditionalGeneration.from_pretrained(model_ckpt if model_ckpt is not None else model_type)
+        self.model = self.accelerator.prepare(self.model)
+        self.model.eval()
 
     """
     questions: list of strings
@@ -52,100 +48,108 @@ class Reward:
     answer_ixs: list of integer indeces corresponding to ground truth answer index from answers list of lists
     """
     def get_reward(self,
-                   questions: List[str],
-                   knowledges: List[str],
-                   choicess: List[List[str]],
-                   answer_ixs: List[int],
+                   questions_input_ids: torch.tensor, # (B, QL)
+                   questions_attention_mask: torch.tensor, # (B, QL)
+                   choicess_input_ids: torch.tensor, # (B, AL)
+                   choicess_attention_mask: torch.tensor, # (B, AL)
+                   choicess_labels: torch.tensor, # (B, AL)
+                   answer_ixs: torch.tensor, # (B)
+                   knowledges_input_ids: Optional[torch.tensor] = None, # (B, KL)
+                   knowledges_attention_mask: Optional[torch.tensor] = None, # (B, KL)
                    override_gain = None,
                    override_bias = None,
                    skip_reward = False,
-                  ) -> Tuple[List[float], float, int, int]:
-        if knowledges is None:
-            knowledges = [None for _ in questions]
-
-        assert len(questions) == len(knowledges)
-        assert len(questions) == len(choicess)
-
-        if not self.do_not_lowercase:
-            questions = [a.lower() for a in questions]
-            knowledges = [a.lower() if a is not None else None for a in knowledges]
-            choicess = [[a.lower() for a in b] for b in choicess]
-        prompts = [
-            question + (f' \\n {knowledge}' if knowledge is not None else '')
-            for question, knowledge, choices in zip(questions, knowledges, choicess)]
+                  ):
+        questions_len = questions_attention_mask.long().sum(dim=1)
+        prompts_input_ids = F.pad(questions_input_ids, (0, self.tokenizer.max_knowledge_len + 3), value=self.tokenizer.pad_token_id)
+        prompts_attention_mask = F.pad(questions_attention_mask, (0, self.tokenizer.max_knowledge_len + 3), value=0)
+        if knowledges_input_ids is not None and knowledges_attention_mask is not None:
+            B = questions_input_ids.size(0)
+            knowledges_len = knowledges_attention_mask.long().sum(dim=1)
+            for b in range(B):
+                prompts_input_ids[b, questions_len[b]:questions_len[b]+3] = torch.tensor([3, 2, 29], dtype=torch.long, device=questions_input_ids.device)
+                prompts_input_ids[b, questions_len[b]+3:questions_len[b]+3+knowledges_len[b]] = knowledges_input_ids[b, :knowledges_len[b]]
+                prompts_attention_mask[b, questions_len[b]:questions_len[b]+3+knowledges_len[b]] = 1
 
         # Compute number of choices for each question, and flatten prompts accordingly
-        num_ans = [len(c) for c in choicess]
-        max_ans_num = max(num_ans)
-        flattened_prompts = list(np.repeat(np.array(prompts, dtype=object), num_ans, axis=0))
-        flattened_choices = list(chain(*choicess))
+        num_ans = torch.tensor([choices_input_ids.size(0) for choices_input_ids in choicess_input_ids], device=choicess_input_ids[0].device)
+        max_ans_num = num_ans.max().item()
+        flattened_prompts_input_ids = torch.repeat_interleave(prompts_input_ids, 8, dim=0) # (B * K, L)
+        flattened_prompts_attention_mask = torch.repeat_interleave(prompts_attention_mask, 8, dim=0) # (B * K, L)
+        flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * K, L)
+        flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * K, L)
+        flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * K, L)
 
         # Preallocate tensor for all of the loss
-        all_losses = torch.zeros(len(flattened_prompts), device=self.device)
+        all_losses = torch.zeros(flattened_prompts_input_ids.size(0), device=self.device)
 
-        for i in range(0, len(flattened_prompts), self.batch_size):
-            j = min(i + self.batch_size, len(flattened_prompts))
-            batch_prompts = flattened_prompts[i:j]
-            batch_choices = flattened_choices[i:j]
+        for i in range(0, flattened_prompts_input_ids.size(0), self.batch_size):
+            j = min(i + self.batch_size, flattened_prompts_input_ids.size(0))
+            batch_prompts_input_ids = flattened_prompts_input_ids[i:j]
+            batch_prompts_attention_mask = flattened_prompts_attention_mask[i:j]
+            batch_choices_input_ids = flattened_choices_input_ids[i:j]
+            batch_choices_attention_mask = flattened_choices_attention_mask[i:j]
+            batch_choices_labels = flattened_choices_labels[i:j]
 
-            # Tokenize prompts and inputs
-            tokenized_prompts = self.tokenizer(batch_prompts, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.max_input_len).to(self.device)
-            tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.max_input_len).to(self.device)
-            tokenized_choices_ids = tokenized_choices.input_ids
-            pad_mask = (tokenized_choices_ids == self.tokenizer.pad_token_id)
-
-            with torch.no_grad():
-                logits = self.inference_model(
-                    input_ids=tokenized_prompts.input_ids,
-                    attention_mask=tokenized_prompts.attention_mask,
-                    labels=tokenized_choices_ids,
-                ).logits # (B, L, V)
-
-            # Set ignore index for loss calculation
-            tokenized_choices_ids[pad_mask] = -100
+            logits = self.model(
+                input_ids=batch_prompts_input_ids,
+                attention_mask=batch_prompts_attention_mask,
+                labels=batch_choices_input_ids,
+            ).logits # (B, L, V)
 
             # Loss will be exactly 0 for ignored, pad idx tokens
-            losses = self.loss_fct(logits.view(-1, logits.size(-1)), tokenized_choices_ids.view(-1))
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
+            losses = loss_fct(logits.view(-1, logits.size(-1)), batch_choices_labels.view(-1))
 
             # Take mean of loss
-            losses = losses.view(tokenized_choices_ids.shape) # (B, L)
-            losses = reduce_mean(losses, ~pad_mask, axis=-1) # (B)
+            losses = losses.view(batch_choices_labels.size()) # (B, L)
+            losses = reduce_mean(losses, batch_choices_attention_mask, axis=-1) # (B)
 
             # Update all loss
             all_losses[i:j] = losses
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logits = torch.empty(len(questions), max_ans_num, device=self.device).fill_(float('-inf'))
+        answer_logitss = torch.empty(prompts_input_ids.size(0), 8, device=self.device).fill_(float('-inf'))
         cur_arr_idx = 0
         for idx, sz in enumerate(num_ans):
-            answer_logits[idx, :sz] = -all_losses[cur_arr_idx:cur_arr_idx+sz]
+            answer_logitss[idx, :sz] = -all_losses[cur_arr_idx:cur_arr_idx+sz]
             cur_arr_idx += sz
-        answer_probs = answer_logits.softmax(axis=1)
+        answer_probss = answer_logitss.softmax(axis=1)
 
         # Compute accuracy from argmax answer
-        preds = answer_probs.argmax(axis=1).detach().cpu()
-        corrects = (preds == torch.tensor(answer_ixs)).tolist()
+        preds = answer_probss.argmax(axis=1)
+        corrects = (preds == answer_ixs)
 
         if skip_reward:
             return {
                 'corrects': corrects,
                 'preds': preds,
-                'answer_logits': answer_logits.detach().cpu(),
-                'answer_probs': answer_probs.detach().cpu(),
+                'answer_logitss': answer_logitss, # (B, C)
+                'answer_probss': answer_probss, # (B, C)
             }
 
         # Probabilities of the gt answer
-        gt_idxs = torch.tensor(answer_ixs, dtype=torch.long, device=self.device).unsqueeze(-1)
-        gt_answer_probs = torch.gather(answer_probs, dim=-1, index=gt_idxs)
-        gt_answer_logits = torch.gather(answer_logits, dim=-1, index=gt_idxs)
+        gt_idxs = answer_ixs.unsqueeze(-1)
+        gt_answer_probs = torch.gather(answer_probss, dim=-1, index=gt_idxs)
+        gt_answer_logits = torch.gather(answer_logitss, dim=-1, index=gt_idxs)
 
         if self.reward_shape == 0: # r = p(a*|q,k) - p(a*|q), same as using --prob_diff before
             rewards = gt_answer_probs.squeeze(-1)
 
-            if knowledges[0] is not None:
+            if knowledges_input_ids is not None:
                 knowless_results = self.get_reward(
-                    questions, None, choicess, answer_ixs, override_gain, override_bias)
-                rewards -= torch.tensor(knowless_results['rewards/raw'], device=self.device)
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                rewards -= knowless_results['rewards/raw']
 
         elif self.reward_shape == 1: # r = p(a*|q,k), same as using no --prob_diff before
             rewards = gt_answer_probs.squeeze(-1)
@@ -153,75 +157,123 @@ class Reward:
         elif self.reward_shape == 2: # r = s(a*|q,k) - s(a*|q), same as using --prob_diff and --prob_nonorm before
             rewards = gt_answer_logits.squeeze(-1)
 
-            if knowledges[0] is not None:
+            if knowledges_input_ids is not None:
                 knowless_results = self.get_reward(
-                    questions, None, choicess, answer_ixs, override_gain, override_bias)
-                rewards -= torch.tensor(knowless_results['rewards/raw'], device=self.device)
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                rewards -= knowless_results['rewards/raw']
 
         elif self.reward_shape == 3: # r = s(a*|q,k), same as using --prob_nonorm but no --prob_diff before
             rewards = gt_answer_logits.squeeze(-1)
 
         elif self.reward_shape == 4: # r = { tanh[s(a*|q,k) - max s(a'|q,k)] - tanh[s(a*|q) - max s(a'|q)] } / 2
-            distractor_idxs = answer_logits.argsort(dim=1, descending=True)
+            distractor_idxs = answer_logitss.argsort(dim=1, descending=True)
             take_second = (distractor_idxs[:, :1] == gt_idxs).long()
 
             distractor_idxs = torch.gather(distractor_idxs, dim=-1, index=take_second)
-            distractor_logits = torch.gather(answer_logits, dim=-1, index=distractor_idxs)
+            distractor_logits = torch.gather(answer_logitss, dim=-1, index=distractor_idxs)
             rewards = (0.5 * torch.tanh(gt_answer_logits - distractor_logits)).squeeze(-1)
 
-            if knowledges[0] is not None:
+            if knowledges_input_ids is not None:
                 knowless_results = self.get_reward(
-                    questions, None, choicess, answer_ixs, override_gain, override_bias)
-                rewards -= torch.tensor(knowless_results['rewards/raw'], device=self.device)
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                rewards -= knowless_results['rewards/raw']
 
         elif self.reward_shape == 5: # r = { sgn[s(a*|q,k) - max s(a'|q,k)] - sgn[s(a*|q) - max s(a'|q)] } / 2
-            distractor_idxs = answer_logits.argsort(dim=1, descending=True)
+            distractor_idxs = answer_logitss.argsort(dim=1, descending=True)
             take_second = (distractor_idxs[:, :1] == gt_idxs).long()
 
             distractor_idxs = torch.gather(distractor_idxs, dim=-1, index=take_second)
-            distractor_logits = torch.gather(answer_logits, dim=-1, index=distractor_idxs)
+            distractor_logits = torch.gather(answer_logitss, dim=-1, index=distractor_idxs)
             rewards = (0.5 * torch.sign(gt_answer_logits - distractor_logits)).squeeze(-1)
 
-            if knowledges[0] is not None:
+            if knowledges_input_ids is not None:
                 knowless_results = self.get_reward(
-                    questions, None, choicess, answer_ixs, override_gain, override_bias)
-                rewards -= torch.tensor(knowless_results['rewards/raw'], device=self.device)
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                rewards -= knowless_results['rewards/raw']
 
         elif self.reward_shape == 6: # r = { tanh[p(a*|q,k) - 1/|A|] - tanh[p(a*|q) - 1/|A|] } / 2
             rewards = (0.5 * torch.tanh(gt_answer_probs - 1.0 / torch.tensor(num_ans, device=gt_answer_probs.device).unsqueeze(-1))).squeeze(-1)
 
-            if knowledges[0] is not None:
+            if knowledges_input_ids is not None:
                 knowless_results = self.get_reward(
-                    questions, None, choicess, answer_ixs, override_gain, override_bias)
-                rewards -= torch.tensor(knowless_results['rewards/raw'], device=self.device)
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                rewards -= knowless_results['rewards/raw']
 
         elif self.reward_shape == 7: # r = { sign[p(a*|q,k) - 1/|A|] - sign[p(a*|q) - 1/|A|] } / 2
             rewards = (0.5 * torch.sign(gt_answer_probs - 1.0 / torch.tensor(num_ans, device=gt_answer_probs.device).unsqueeze(-1))).squeeze(-1)
 
-            if knowledges[0] is not None:
+            if knowledges_input_ids is not None:
                 knowless_results = self.get_reward(
-                    questions, None, choicess, answer_ixs, override_gain, override_bias)
-                rewards -= torch.tensor(knowless_results['rewards/raw'], device=self.device)
-
-        rewards_raw = rewards.detach().cpu().tolist()
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                rewards -= knowless_results['rewards/raw']
 
         gain = self.gain if override_gain is None else override_gain
         bias = self.bias if override_bias is None else override_bias
-        rewards_normalized = [gain * x + bias for x in rewards_raw]
+        rewards_normalized = gain * rewards + bias
 
         return {
             'corrects': corrects,
             'preds': preds,
-            'answer_logits': answer_logits.detach().cpu(),
-            'answer_probs': answer_probs.detach().cpu(),
-            'rewards/raw': rewards_raw,
+            'answer_logitss': answer_logitss, # (B, C)
+            'answer_probss': answer_probss, # (B, C)
+            'rewards/raw': rewards,
             'rewards/normalized': rewards_normalized,
         }
 
     def kl_penalize_reward(self, results):
-        logprobs = results['response/logprobs']
-        ref_logprobs = results['response/ref_logprobs']
-        mask = results['response/mask']
+        logprobs = results['knowledges_logprobs']
+        ref_logprobs = results['knowledges_ref_logprobs']
+        mask = results['knowledges_attention_mask']
         normalized_rewards = results['rewards/normalized']
 
         kl = logprobs - ref_logprobs
@@ -230,7 +282,7 @@ class Reward:
         flattened_rewards = torch.tensor([
             [0.] * (l-1) + [r] + [0.] * (RL-l)
             for r, l in zip(normalized_rewards, torch.sum(mask, dim=1).tolist())
-        ], device=logprobs.device) # (B, RL)
+        ], device=logprobs.device) # (B, KL)
         penalized_rewards = flattened_rewards - kl_penalty
         # TODO: This is slightly different from the paper
 
@@ -239,60 +291,67 @@ class Reward:
         results['rewards/penalized'] = penalized_rewards
 
     def get_reward_ensemble(self,
-                            questions: List[str],
-                            knowledgess: List[List[str]],
-                            choicess: List[List[str]],
-                            answer_ixs: List[int],
+                            questions_input_ids: torch.tensor, # (B, QL)
+                            questions_attention_mask: torch.tensor, # (B, QL)
+                            choicess_input_ids: torch.tensor, # (B, AL)
+                            choicess_attention_mask: torch.tensor, # (B, AL)
+                            choicess_labels: torch.tensor, # (B, AL)
+                            answer_ixs: torch.tensor, # (B)
+                            knowledgess_input_ids: torch.tensor, # (K, B, KL)
+                            knowledgess_attention_mask: torch.tensor, # (K, B, KL)
                             override_gain = None,
                             override_bias = None,
-                           ) -> Tuple[List[float], float, int, int]:
-        answer_logitss = []
-        answer_probss = []
+                           ):
+        answer_logitsss = [] # [K * (B, C)]
+        answer_probsss = [] # [K * (B, C)]
 
-        knowless_results = self.get_reward(questions, None, choicess, answer_ixs, override_gain, override_bias)
-        answer_logitss.append(knowless_results['answer_logits'])
-        answer_probss.append(knowless_results['answer_probs'])
+        knowless_results = self.get_reward(
+            questions_input_ids, questions_attention_mask,
+            choicess_input_ids, choicess_attention_mask, choicess_labels,
+            answer_ixs,
+            None, None,
+            override_gain, override_bias,
+            skip_reward=True,
+        )
+        answer_logitsss.append(knowless_results['answer_logitss'])
+        answer_probsss.append(knowless_results['answer_probss'])
 
-        for knowledges in knowledgess:
-            results = self.get_reward(questions, knowledges, choicess, answer_ixs, override_gain, override_bias, skip_reward=True)
-            answer_logitss.append(results['answer_logits'])
-            answer_probss.append(results['answer_probs'])
+        for (knowlegdes_input_ids, knowledges_attention_mask) in zip(knowledgess_input_ids, knowledgess_attention_mask):
+            results = self.get_reward(
+                questions_input_ids, questions_attention_mask,
+                choicess_input_ids, choicess_attention_mask, choicess_labels,
+                answer_ixs,
+                knowlegdes_input_ids, knowledges_attention_mask,
+                override_gain, override_bias,
+                skip_reward=True,
+            )
+            answer_logitsss.append(results['answer_logitss'])
+            answer_probsss.append(results['answer_probss'])
 
-        answer_logitss = torch.stack(answer_logitss) # (K+1, B, C)
-        answer_probss = torch.stack(answer_probss)
+        answer_logitsss = torch.stack(answer_logitsss) # (1+K, B, C)
+        answer_probsss = torch.stack(answer_probsss)
 
         if self.ensembling == 'max':
-            answer_probs = answer_probss.max(dim=0).values
-            preds = answer_probs.argmax(dim=1)
+            answer_probss = answer_probsss.max(dim=0).values
+            preds = answer_probss.argmax(dim=1)
         elif self.ensembling == 'moe':
-            answer_probs = answer_probss.mean(dim=0)
-            preds = answer_probs.argmax(dim=1)
+            answer_probss = answer_probsss.mean(dim=0)
+            preds = answer_probss.argmax(dim=1)
         elif self.ensembling == 'poe':
-            answer_probs = answer_probss.log().mean(dim=0).exp()
-            preds = answer_probs.argmax(dim=1)
+            answer_probss = answer_probsss.log().mean(dim=0).exp()
+            preds = answer_probss.argmax(dim=1)
         elif self.ensembling == 'majority':
-            predss = answer_probss.argmax(dim=2) # (K+1, B)
+            predss = answer_probsss.argmax(dim=2) # (1+K, B)
             preds = predss.mode(dim=0).values
 
-        num_ans = [len(c) for c in choicess]
-        max_ans_num = max(num_ans)
-
         # Compute accuracy from argmax answer
-        corrects = (preds == torch.tensor(answer_ixs)).tolist()
-
-        '''
-        selected_knowledges_ix = (answer_probss.max(dim=-1).values.argmax(dim=0) - 1).tolist() # (B)
-        selected_knowledges = [knowledgess[ix][b] if ix >= 0 else '' for (b, ix) in enumerate(selected_knowledges_ix)]
-        knowless_corrects = (knowless_results['answer_probs'].argmax(dim=1) == torch.Tensor(answer_ixs)).tolist()
-        knowful_corrects = (pred_answers == torch.Tensor(answer_ixs)).tolist()
-        knowledge_analyses = list(zip(selected_knowledges, knowless_corrects, knowful_corrects))
-        '''
+        corrects = (preds == answer_ixs)
 
         return {
             'corrects': corrects,
             'preds': preds,
-            'answer_logitss': answer_logitss,
-            'answer_probss': answer_probss,
+            'answer_logitsss': answer_logitsss,
+            'answer_probsss': answer_probsss,
         }
 
     def write_reward_norm(self, reward_dir):

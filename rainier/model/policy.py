@@ -1,8 +1,7 @@
-import os
 from typing import Union, List, Dict
 import torch
 import torch.nn.functional as F
-from transformers import T5ForConditionalGeneration, T5Tokenizer
+from transformers import T5ForConditionalGeneration
 from model.t5 import T5ForConditionalGenerationAndTokenRegression
 from utils.utils import logits_to_entropy, mask_pad
 
@@ -12,116 +11,124 @@ class Policy:
     def __init__(self,
                  model_type: str,
                  model_ckpt: str,
+                 tokenizer,
                  policy_value_sharing: bool,
                  policy_reward_sharing: bool,
-                 max_input_len: int,
-                 max_output_len: int,
-                 device: torch.device,
-                 device_map=None,
+                 device,
+                 accelerator,
                 ):
-        self.tokenizer = T5Tokenizer.from_pretrained(model_type)
+        self.tokenizer = tokenizer
+        self.policy_value_sharing = policy_value_sharing
+        self.policy_reward_sharing = policy_reward_sharing
+        self.device = device
+        self.accelerator = accelerator
+
         if policy_value_sharing:
             self.model = T5ForConditionalGenerationAndTokenRegression.from_pretrained(model_type)
         else:
             self.model = T5ForConditionalGeneration.from_pretrained(model_type)
         if model_ckpt is not None:
-            checkpoint = torch.load(model_ckpt, map_location=torch.device('cpu'))
+            checkpoint = torch.load(model_ckpt, map_location='cpu')
             self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
+        self.model = self.accelerator.prepare(self.model)
         self.model.eval()
-        self.model.to(device)
-        self.model.parallelize(device_map=device_map)
-
-        self.policy_value_sharing = policy_value_sharing
-        self.policy_reward_sharing = policy_reward_sharing
-        self.max_input_len = max_input_len
-        self.max_output_len = max_output_len
-        self.device = device
 
     def sample(self,
-               text: List[str],
+               questions_input_ids: torch.Tensor, # (B, QL)
+               questions_attention_mask: torch.Tensor, # (B, QL)
                sample: bool = True,
                top_k: int = None,
                top_p: float = None,
                temperature: float = None,
               ) -> Dict[str, Union[torch.Tensor, List[str]]]:
-
-        tokenized = self.tokenizer.batch_encode_plus(
-            text,
-            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.max_input_len)
-        input_ids = tokenized.input_ids.to(self.device)
-        attention_mask = tokenized.attention_mask.to(self.device)
+        questions_text = self.tokenizer.batch_decode(questions_input_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
 
         if not self.policy_reward_sharing:
-            response_ids = self.model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_length=self.max_output_len + 1,
-                min_length=3,
+            knowledges_input_ids = self.model.module.generate(
+                input_ids=questions_input_ids,
+                attention_mask=questions_attention_mask,
+                max_length=self.tokenizer.max_knowledge_len + 1,
+                min_length=2,
                 do_sample=sample,
                 top_k=top_k,
                 top_p=top_p,
                 temperature=temperature,
             ) # begins with 0 ([BOS]); ends with 1 ([EOS])
-            response_ids = response_ids[:, 1:].contiguous() # no beginning; ends with 1 ([EOS])
+            knowledges_input_ids = knowledges_input_ids[:, 1:].contiguous() # no beginning; ends with 1 ([EOS])
         else:
-            response_ids = self.model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_length=self.max_output_len + 1,
-                min_length=3,
+            knowledges_input_ids = self.model.module.generate(
+                input_ids=questions_input_ids,
+                attention_mask=questions_attention_mask,
+                max_length=self.tokenizer.max_knowledge_len + 3,
+                min_length=4,
                 do_sample=sample,
                 top_k=top_k,
                 top_p=top_p,
                 temperature=temperature,
                 forced_decoder_ids=[[1, 16113], [2, 10]], # 'Knowledge:' is 2 tokens under T5Tokenizer
             ) # begins with 0 ([BOS]); ends with 1 ([EOS])
-            response_ids = response_ids[:, 3:].contiguous() # no beginning; ends with 1 ([EOS])
-        response_mask = (response_ids != self.model.config.pad_token_id).int()
-        response_text = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+            knowledges_input_ids = knowledges_input_ids[:, 3:].contiguous() # no beginning; ends with 1 ([EOS])
+        knowledges_input_ids = F.pad(knowledges_input_ids, (0, self.tokenizer.max_knowledge_len - knowledges_input_ids.size(1)), value=self.tokenizer.pad_token_id) # (B, KL)
+        knowledges_attention_mask = (knowledges_input_ids != self.tokenizer.pad_token_id).int()
+        knowledges_text = self.tokenizer.batch_decode(knowledges_input_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+
+        lowercased_knowledges = [knowledge.lower() for knowledge in knowledges_text]
+        lowercased_knowledges_tok = self.tokenizer.batch_encode_plus(
+            lowercased_knowledges,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_knowledge_len)
+        lowercased_knowledges_input_ids = lowercased_knowledges_tok.input_ids
+        lowercased_knowledges_attention_mask = lowercased_knowledges_tok.attention_mask
 
         with torch.no_grad():
-            outputs = self.forward_pass(input_ids, attention_mask, response_ids, response_mask)
-        response_logits = outputs['response/logits']
-        response_logprobs = outputs['response/logprobs']
-        response_entropy = outputs['response/entropy']
+            outputs = self.forward_pass(
+                questions_input_ids,
+                questions_attention_mask,
+                knowledges_input_ids,
+                knowledges_attention_mask,
+            )
+        knowledges_logits = outputs['knowledges_logits']
+        knowledges_logprobs = outputs['knowledges_logprobs']
+        knowledges_entropy = outputs['knowledges_entropy']
 
         return {
-            'query/text': text,
-            'query/input_ids': input_ids,
-            'query/mask': attention_mask,
-            'response/text': response_text,
-            'response/input_ids': response_ids,
-            'response/mask': response_mask,
-            'response/logits': response_logits,
-            'response/logprobs': response_logprobs,
-            'response/entropy': response_entropy,
+            'questions_text': questions_text,
+            'questions_input_ids': questions_input_ids, # (B, QL)
+            'questions_attention_mask': questions_attention_mask, # (B, QL)
+            'knowledges_text': knowledges_text,
+            'knowledges_input_ids': knowledges_input_ids, # (B, KL)
+            'knowledges_attention_mask': knowledges_attention_mask, # (B, KL)
+            'lowercased_knowledges_text': lowercased_knowledges,
+            'lowercased_knowledges_input_ids': lowercased_knowledges_input_ids, # (B, KL)
+            'lowercased_knowledges_attention_mask': lowercased_knowledges_attention_mask, # (B, KL)
+            'knowledges_logits': knowledges_logits, # (B, KL, V)
+            'knowledges_logprobs': knowledges_logprobs, # (B, KL)
+            'knowledges_entropy': knowledges_entropy, # (B, KL)
         }
 
     def forward_pass(self,
-                     query_input_ids: torch.Tensor,
-                     query_mask: torch.Tensor,
-                     response_input_ids: torch.Tensor,
-                     response_mask: torch.Tensor,
+                     questions_input_ids: torch.Tensor, # (B, QL)
+                     questions_attention_mask: torch.Tensor, # (B, QL)
+                     knowledges_input_ids: torch.Tensor, # (B, KL)
+                     knowledges_attention_mask: torch.Tensor, # (B, KL)
                     ):
 
         outputs = self.model(
-            input_ids=query_input_ids,
-            attention_mask=query_mask,
-            labels=mask_pad(response_input_ids, response_mask, -100),
+            input_ids=questions_input_ids,
+            attention_mask=questions_attention_mask,
+            labels=mask_pad(knowledges_input_ids, knowledges_attention_mask, -100),
             return_dict=True,
             output_attentions=False,
             output_hidden_states=False,
         )
 
-        response_logits = outputs.logits # (B, RL, V)
-        logprobs = F.log_softmax(response_logits, dim=-1)
-        response_logprobs = torch.gather(logprobs, 2, response_input_ids[:, :, None]).squeeze(2) # (B, RL)
-        response_entropy = logits_to_entropy(response_logits) # (B, RL)
+        knowledges_logits = outputs.logits # (B, KL, V)
+        logprobs = F.log_softmax(knowledges_logits, dim=-1)
+        knowledges_logprobs = torch.gather(logprobs, 2, knowledges_input_ids[:, :, None]).squeeze(2) # (B, KL)
+        knowledges_entropy = logits_to_entropy(knowledges_logits) # (B, KL)
 
         return {
-            'response/logits': response_logits,
-            'response/logprobs': mask_pad(response_logprobs, response_mask),
-            'response/entropy': mask_pad(response_entropy, response_mask),
+            'knowledges_logits': knowledges_logits, # (B, KL, V)
+            'knowledges_logprobs': mask_pad(knowledges_logprobs, knowledges_attention_mask), # (B, KL)
+            'knowledges_entropy': mask_pad(knowledges_entropy, knowledges_attention_mask), # (B, KL)
         }
-
