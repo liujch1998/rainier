@@ -11,14 +11,12 @@ import shutil
 from tqdm import tqdm
 
 import torch
-from torch.utils.data import IterableDataset, Dataset, DataLoader
-# from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import Dataset, DataLoader
 import transformers
 import accelerate
 import wandb
 
 from utils.utils import ensure_dir, set_seed, reduce_mean
-from data import QADataset
 
 logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'))
 log = logging.getLogger(__name__)
@@ -97,7 +95,6 @@ class QKADataset(Dataset):
     def collate_fn(batch):
         global tokenizer
 
-        # task = [item['task'] for item in batch]
         task_ix = torch.tensor([item['task_ix'] for item in batch], dtype=torch.long)
         answer_ix = torch.tensor([item['answer_ix'] for item in batch], dtype=torch.long)
 
@@ -117,9 +114,6 @@ class QKADataset(Dataset):
         choicess_attention_mask = torch.stack([choices_tok.attention_mask for choices_tok in choicess_tok], dim=0)
         choicess_labels = choicess_input_ids.clone()
         choicess_labels[choicess_attention_mask == 0] = -100
-        # choices_labels = [choice_tok.input_ids.clone() for choice_tok in choices_tok]
-        # for choice_labels, choice_tok in zip(choices_labels, choices_tok):
-        #     choice_labels[choice_tok.attention_mask == 0] = -100
 
         answers = [item['answer'] for item in batch]
         answers_tok = tokenizer.batch_encode_plus(
@@ -155,8 +149,6 @@ class QKADataset(Dataset):
             'choices_input_ids': choicess_input_ids,
             'choices_attention_mask': choicess_attention_mask,
             'choices_labels': choicess_labels,
-            # 'answers_input_ids': answers_tok.input_ids,
-            # 'answers_attention_mask': answers_tok.attention_mask,
             'answer_labels': answers_labels,
             'knowledge_with_prefix_input_ids': knowledges_with_prefix_input_ids,
             'knowledge_with_prefix_attention_mask': knowledges_with_prefix_attention_mask,
@@ -188,7 +180,6 @@ class Trainer:
         self.device = device
         self.accelerator = accelerator
         if not self.args.nosave and self.accelerator.is_main_process:
-            # self.writer = SummaryWriter(log_dir=args.tensorboard_dir)
             wandb.init(project='rainier_stageI', name=args.run_name, config=args)
             wandb.define_metric('train/step')
             wandb.define_metric('eval/step')
@@ -254,13 +245,12 @@ class Trainer:
             if self.args.qka_loss:
                 qka_loss = self.qka_loss(batch)
             loss = qk_loss + qa_loss + qka_loss
-            losses.append(loss)
-            qk_losses.append(qk_loss)
-            qa_losses.append(qa_loss)
-            qka_losses.append(qka_loss)
+            losses.append(loss.detach().clone())
+            qk_losses.append(qk_loss.detach().clone())
+            qa_losses.append(qa_loss.detach().clone())
+            qka_losses.append(qka_loss.detach().clone())
             loss /= self.args.accumulate_grad_batches
             self.accelerator.backward(loss)
-            # print(f'loss: {loss.item():.4f}, qk_loss: {qk_loss.item():.4f}, qa_loss: {qa_loss.item():.4f}, qka_loss: {qka_loss.item():.4f}')
         self.optimizer.step()
 
         loss = torch.stack(losses).mean(dim=0, keepdim=True) # (1)
@@ -278,10 +268,8 @@ class Trainer:
         qa_loss = qa_losses.mean().item()
         qka_loss = qka_losses.mean().item()
 
-        # print(f'Train loss: {loss:.4f} (qk: {qk_loss:.4f}, qa: {qa_loss:.4f}, qka: {qka_loss:.4f})')
         if not self.args.nosave and self.accelerator.is_main_process:
             if step % self.args.log_interval == 0:
-                # self.writer.add_scalar('train/loss', loss.item(), step)
                 wandb.log({
                     'train/step': step,
                     'train/loss': loss,
@@ -307,7 +295,6 @@ class Trainer:
         flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * K, L)
         flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * K, L)
         flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * K, L)
-        # print(questions_input_ids.size(), choicess_labels.size())
 
         # Preallocate tensor for all of the loss
         all_losses = torch.zeros(flattened_questions_input_ids.size(0), device=self.device)
@@ -320,21 +307,11 @@ class Trainer:
             batch_choices_attention_mask = flattened_choices_attention_mask[i:j]
             batch_choices_labels = flattened_choices_labels[i:j]
 
-            # Tokenize prompts and inputs
-            # tokenized_prompts = self.tokenizer(batch_prompts, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_question_len).to(self.device)
-            # tokenized_choices = self.tokenizer(batch_choices, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.args.max_answer_len).to(self.device)
-            # tokenized_choices_ids = tokenized_choices.input_ids
-            # pad_mask = (tokenized_choices_ids == self.tokenizer.pad_token_id)
-
-            # print(batch_questions_input_ids.size(), batch_questions_attention_mask.size(), batch_choices_input_ids.size())
             logits = self.model(
                 input_ids=batch_questions_input_ids,
                 attention_mask=batch_questions_attention_mask,
                 labels=batch_choices_input_ids,
             ).logits # (B, L, V)
-
-            # Set ignore index for loss calculation
-            # tokenized_choices_ids[pad_mask] = -100
 
             # Loss will be exactly 0 for ignored, pad idx tokens
             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100,reduction='none')
@@ -382,27 +359,17 @@ class Trainer:
             losses, qk_losses, qa_losses, qka_losses = [], [], [], []
             corrects, task_ixs = [], []
             for i, batch in enumerate(tqdm(self.eval_dataloader)):
-                # if i == 10 + torch.distributed.get_rank():
-                #     break
-                # if i == 10:
-                #     break
-                # if i == 50:
-                #     break
                 qk_loss = self.qk_loss(batch)
                 qa_loss = self.qa_loss(batch)
                 qka_loss = self.qka_loss(batch)
                 loss = qk_loss + qa_loss + qka_loss
                 results = self.acc(batch)
-                losses.append(loss)
-                qk_losses.append(qk_loss)
-                qa_losses.append(qa_loss)
-                qka_losses.append(qka_loss)
+                losses.append(loss.detach().clone())
+                qk_losses.append(qk_loss.detach().clone())
+                qa_losses.append(qa_loss.detach().clone())
+                qka_losses.append(qka_loss.detach().clone())
                 corrects.append(results['corrects'])
                 task_ixs.append(batch['task_ix'])
-                # for task, c in zip(batch['task'], results['corrects']):
-                #     corrects_by_task[task].append(c)
-            # accelerate.utils.wait_for_everyone()
-                # torch.distributed.barrier()
 
         loss = torch.stack(losses).mean(dim=0, keepdim=True) # (1)
         qk_loss = torch.stack(qk_losses).mean(dim=0, keepdim=True) # (1)
@@ -410,15 +377,6 @@ class Trainer:
         qka_loss = torch.stack(qka_losses).mean(dim=0, keepdim=True) # (1)
         corrects = torch.cat(corrects, dim=0) # (N)
         task_ixs = torch.cat(task_ixs, dim=0) # (N)
-        # corrects_by_task = {k: torch.stack(v, dim=0) for k, v in corrects_by_task.items()}
-
-        # loss = loss.item()
-        # qk_loss = qk_loss.item()
-        # qa_loss = qa_loss.item()
-        # qka_loss = qka_loss.item()
-        # acc_weighted = corrects.float().mean().item()
-        # acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
-        # acc_unweighted = np.mean(list(acc_by_task.values()))
 
         losses = self.accelerator.gather(loss) # (num_gpus)
         qk_losses = self.accelerator.gather(qk_loss) # (num_gpus)
@@ -426,7 +384,6 @@ class Trainer:
         qka_losses = self.accelerator.gather(qka_loss) # (num_gpus)
         corrects = self.accelerator.gather(corrects) # (num_gpus * N)
         task_ixs = self.accelerator.gather(task_ixs) # (num_gpus * N)
-        # corrects_by_task = self.accelerator.gather(corrects_by_task)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
         corrects = corrects[:len(self.eval_dataloader.dataset)]
@@ -445,9 +402,7 @@ class Trainer:
         acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
 
-        # print(f'Eval loss: {loss:.4f} (qk: {qk_loss:.4f}, qa: {qa_loss:.4f}, qka: {qka_loss:.4f})')
         if not self.args.nosave and self.accelerator.is_main_process:
-            # self.writer.add_scalar('eval/loss', loss, step)
             stats = {
                 'eval/step': step,
                 'eval/loss': loss,
@@ -534,48 +489,6 @@ def main():
     # GPUs
     accelerator = accelerate.Accelerator()
     device = accelerator.device
-    '''
-    assert torch.cuda.is_available(), 'CUDA is not available'
-    num_gpus = torch.cuda.device_count()
-    log.info(f'Detected {num_gpus} GPUS')
-    devices = {}
-    for i in range(num_gpus):
-        devices[i] = torch.device('cuda:' + str(i))
-
-    device_map = None
-    if num_gpus == 1:
-        device_map = None
-    elif num_gpus == 4:  # 4x RTX6000 for T5-large
-        device_map = {
-            0: [0, 1, 2],
-            1: [3, 4, 5, 6, 7, 8, 9],
-            2: [10, 11, 12, 13, 14, 15, 16],
-            3: [17, 18, 19, 20, 21, 22, 23],
-        }
-    elif num_gpus == 6:
-        device_map = {
-            0: [0],
-            1: [1, 2, 3, 4],
-            2: [5, 6, 7, 8],
-            3: [9, 10, 11, 12, 13],
-            4: [14, 15, 16, 17, 18],
-            5: [19, 20, 21, 22, 23],
-        }
-    elif num_gpus == 8:  # 8x V100 for T5-3b
-        device_map = {
-            0: [0],
-            1: [1, 2, 3],
-            2: [4, 5, 6],
-            3: [7, 8, 9],
-            4: [10, 11, 12],
-            5: [13, 14, 15],
-            6: [16, 17, 18, 19],
-            7: [20, 21, 22, 23],
-        }
-    else:
-        log.error('Invalid number of GPUs!')
-        exit(-1)
-    '''
 
     # Set up save directories
     if not args.nosave and accelerator.is_main_process:
@@ -586,12 +499,10 @@ def main():
         else:
             time = datetime.datetime.now()
             date_time = time.strftime('%Y%m%d-%H%M%S')
-            import socket
-            args.run_name = date_time + '_' + socket.gethostname() + '_' + args.job_name
+            args.run_name = date_time + '_' + args.job_name
             args.save_dir = os.path.join(args.output_dir, args.run_name)
         args.model_dir = os.path.join(args.save_dir, 'model')
-        args.tensorboard_dir = os.path.join(args.save_dir, 'tensorboard')
-        for d in [args.save_dir, args.model_dir, args.tensorboard_dir]:
+        for d in [args.save_dir, args.model_dir]:
             ensure_dir(d)
     
         log.info(f'Write to output directory: {args.save_dir}')
@@ -614,8 +525,6 @@ def main():
     tokenizer.max_answer_len = args.max_answer_len
     tokenizer.max_knowledge_len = args.max_knowledge_len
     model = transformers.T5ForConditionalGeneration.from_pretrained(args.model_type)
-    # model.to(device)
-    # model.parallelize(device_map=device_map)
     model = accelerator.prepare(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     init_step = 0
@@ -631,7 +540,6 @@ def main():
         checkpoint.clear()
 
     optimizer, train_dataloader, eval_dataloader = accelerator.prepare(optimizer, train_dataloader, eval_dataloader)
-    # print(f'Rank {torch.distributed.get_rank()}, eval_dataloader_len: {len(eval_dataloader)}')
 
     # Set up trainer
     trainer = Trainer(
@@ -655,4 +563,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
