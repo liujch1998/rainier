@@ -16,8 +16,8 @@ accelerate launch \
     --num_machines $SLURM_JOB_NUM_NODES --machine_rank $SLURM_NODEID --same_network \
     --num_processes $num_processes \
     --main_process_ip $main_ip_address --main_process_port $available_port \
-    --mixed_precision fp16 \
-    --use_fsdp --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP --fsdp_backward_prefetch_policy BACKWARD_PRE --fsdp_offload_params false --fsdp_sharding_strategy 1 --fsdp_state_dict_type FULL_STATE_DICT --fsdp_transformer_layer_cls_to_wrap T5Block \
-    imitation_v3.py \
-    --model_type allenai/unifiedqa-t5-11b --batch_size 1 --qka_loss \
-    --job_name train_imitation-v3.5-11b --nosave --skip_init_eval
+    --mixed_precision no \
+    --multi_gpu \
+    main_v3.py \
+    --mode train --use_model_ckpt_for_value --pg_coef 20.0 --policy_value_sharing \
+    --job_name $1
