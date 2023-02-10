@@ -15,13 +15,11 @@ class Policy:
                  policy_value_sharing: bool,
                  policy_reward_sharing: bool,
                  device,
-                 accelerator,
                 ):
         self.tokenizer = tokenizer
         self.policy_value_sharing = policy_value_sharing
         self.policy_reward_sharing = policy_reward_sharing
         self.device = device
-        self.accelerator = accelerator
 
         if policy_value_sharing:
             self.model = T5ForConditionalGenerationAndTokenRegression.from_pretrained(model_type)
@@ -31,7 +29,6 @@ class Policy:
             checkpoint = torch.load(model_ckpt, map_location='cpu')
             self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
-        self.model = self.accelerator.prepare(self.model)
         self.model.eval()
 
     def sample(self,

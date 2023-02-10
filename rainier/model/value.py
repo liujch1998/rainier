@@ -11,11 +11,9 @@ class Value:
                  model,
                  tokenizer,
                  device,
-                 accelerator,
                 ):
         self.tokenizer = tokenizer
         self.device = device
-        self.accelerator = accelerator
 
         if model is not None:
             self.model = model
@@ -27,7 +25,6 @@ class Value:
             checkpoint = torch.load(model_ckpt, map_location='cpu')
             self.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
-        self.model = self.accelerator.prepare(self.model)
         self.model.eval()
 
     def forward_pass(self,

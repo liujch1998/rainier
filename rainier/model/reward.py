@@ -20,7 +20,6 @@ class Reward:
                  ensembling,
                  do_not_lowercase,
                  device,
-                 accelerator,
                 ):
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -29,7 +28,6 @@ class Reward:
         self.ensembling = ensembling
         self.do_not_lowercase = do_not_lowercase
         self.device = device
-        self.accelerator = accelerator
 
         self.gain, self.bias = None, None
 
@@ -38,7 +36,6 @@ class Reward:
             return
 
         self.model = T5ForConditionalGeneration.from_pretrained(model_ckpt if model_ckpt is not None else model_type)
-        self.model = self.accelerator.prepare(self.model)
         self.model.eval()
 
     """
@@ -262,12 +259,12 @@ class Reward:
         rewards_normalized = gain * rewards + bias
 
         return {
-            'corrects': corrects,
-            'preds': preds,
+            'corrects': corrects, # (B)
+            'preds': preds, # (B)
             'answer_logitss': answer_logitss, # (B, C)
             'answer_probss': answer_probss, # (B, C)
-            'rewards/raw': rewards,
-            'rewards/normalized': rewards_normalized,
+            'rewards/raw': rewards, # (B)
+            'rewards/normalized': rewards_normalized, # (B)
         }
 
     def kl_penalize_reward(self, results):
@@ -286,9 +283,9 @@ class Reward:
         penalized_rewards = flattened_rewards - kl_penalty
         # TODO: This is slightly different from the paper
 
-        results['rewards/kl'] = kl
-        results['rewards/kl_penalty'] = kl_penalty
-        results['rewards/penalized'] = penalized_rewards
+        results['rewards/kl'] = kl # (B, KL)
+        results['rewards/kl_penalty'] = kl_penalty # (B, KL)
+        results['rewards/penalized'] = penalized_rewards # (B, KL)
 
     def get_reward_ensemble(self,
                             questions_input_ids: torch.tensor, # (B, QL)

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_rainier-v3.0_v2.4-accelerate
 #SBATCH --partition=learnlab
-#SBATCH --nodes=8
+#SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=512G
 #SBATCH --gpus-per-node=8
@@ -12,4 +12,7 @@
 cat $0
 echo "--------------------"
 
-srun --label sbatch/train_rainier-v3.0.sh.wrapper train_rainier-v3.0_v2.4-accelerate
+time=$(date +"%Y%m%d-%H%M%S")
+srun --label sbatch/train_rainier-v3.0.sh.wrapper \
+    ${time}.${SLURM_JOB_ID}.${SLURM_JOB_NAME} \
+    bf16

@@ -20,4 +20,4 @@ accelerate launch \
     --use_fsdp --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP --fsdp_backward_prefetch_policy BACKWARD_PRE --fsdp_offload_params false --fsdp_sharding_strategy 1 --fsdp_state_dict_type FULL_STATE_DICT --fsdp_transformer_layer_cls_to_wrap T5Block \
     imitation_v3.py \
     --model_type allenai/unifiedqa-t5-$3 --batch_size $4 --qka_loss \
-    --job_name $1
+    --run_name $1

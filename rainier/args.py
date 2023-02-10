@@ -110,7 +110,7 @@ def get_args():
         '--eval_interval', type=int, default=500, help='step interval to do evaluation')
     parser.add_argument(
         '--nosave', default=False, action='store_true')
-    parser.add_argument('--job_name', type=str, default=None)
+    parser.add_argument('--run_name', type=str, default=None)
     parser.add_argument(
         '--eval_loop_cap', type=int, default=None, help='cap on number of eval loops')
 

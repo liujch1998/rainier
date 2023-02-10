@@ -16,8 +16,9 @@ accelerate launch \
     --num_machines $SLURM_JOB_NUM_NODES --machine_rank $SLURM_NODEID --same_network \
     --num_processes $num_processes \
     --main_process_ip $main_ip_address --main_process_port $available_port \
-    --mixed_precision no \
+    --mixed_precision $2 \
     --multi_gpu \
     main_v3.py \
-    --mode train --use_model_ckpt_for_value --pg_coef 20.0 --policy_value_sharing \
-    --job_name $1
+    --mode train --use_model_ckpt_for_value --pg_coef 20.0 --policy_value_sharing --batch_size 1 \
+    --gain 3.6504940135998027 --bias 0.04710114196413719 \
+    --run_name $1

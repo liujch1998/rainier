@@ -17,7 +17,7 @@ import wandb
 
 from utils.utils import ensure_dir, set_seed, reduce_mean
 
-log = accelerate.logging.get_logger(__name__, level='INFO')
+log = accelerate.logging.get_logger(__name__, log_level='INFO')
 
 
 class QKADataset(Dataset):
@@ -154,6 +154,7 @@ class QKADataset(Dataset):
             'question_knowledge_input_ids': questions_knowledges_input_ids,
             'question_knowledge_attention_mask': questions_knowledges_attention_mask,
         }
+
 
 class Trainer:
     def __init__(self,
@@ -446,6 +447,7 @@ class Trainer:
         }, f'{self.args.model_dir}/last.pth')
         log.info(f'[step {step}] model checkpoint saved')
 
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -473,11 +475,12 @@ def get_args():
     parser.add_argument(
         '--eval_interval', type=int, default=1000, help='step interval to do evaluation')
     parser.add_argument('--nosave', default=False, action='store_true')
-    parser.add_argument('--job_name', type=str, default=None)
+    parser.add_argument('--run_name', type=str, default=None)
     parser.add_argument('--skip_init_eval', default=False, action='store_true')
 
     args = parser.parse_args()
     return args
+
 
 def main():
     args = get_args()
@@ -489,23 +492,22 @@ def main():
     device = accelerator.device
 
     # Set up save directories
-    if not args.nosave and accelerator.is_main_process:
+    if not args.nosave:
         args.output_dir = '../runs_stageI/'
         if args.load_from_ckpt is not None:
             args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
             args.run_name = args.save_dir.split('/')[-1]
         else:
-            time = datetime.datetime.now()
-            date_time = time.strftime('%Y%m%d-%H%M%S')
-            args.run_name = date_time + '_' + args.job_name
             args.save_dir = os.path.join(args.output_dir, args.run_name)
         args.model_dir = os.path.join(args.save_dir, 'model')
-        for d in [args.save_dir, args.model_dir]:
-            ensure_dir(d)
+        if accelerator.is_main_process:
+            for d in [args.save_dir, args.model_dir]:
+                ensure_dir(d)
     
         log.info(f'Write to output directory: {args.save_dir}')
-        with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
-            json.dump(args.__dict__, f, indent=2)
+        if accelerator.is_main_process:
+            with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
+                json.dump(args.__dict__, f, indent=2)
 
     # Load data
     log.info(f'Loading data ...')
