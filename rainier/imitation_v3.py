@@ -1,8 +1,8 @@
 import argparse
 from collections import defaultdict
-import datetime
 from itertools import chain
 import json
+import logging
 import numpy as np
 import os
 import random
@@ -17,6 +17,7 @@ import wandb
 
 from utils.utils import ensure_dir, set_seed, reduce_mean
 
+logging.basicConfig(level=logging.INFO)
 log = accelerate.logging.get_logger(__name__, log_level='INFO')
 
 
@@ -287,8 +288,6 @@ class Trainer:
         answer_ixs = batch['answer_ix'] # (B)
 
         # Compute number of choices for each question, and flatten prompts accordingly
-        num_ans = torch.tensor([choices_input_ids.size(0) for choices_input_ids in choicess_input_ids], device=choicess_input_ids[0].device)
-        max_ans_num = num_ans.max().item()
         flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, 8, dim=0) # (B * K, L)
         flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, 8, dim=0) # (B * K, L)
         flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * K, L)
@@ -323,23 +322,21 @@ class Trainer:
             # Update all loss
             all_losses[i:j] = losses
 
+        all_losses[flattened_choices_labels[:, 0] == 1] = 1e9 # If the first token is [EOS], then the choice is padding
+
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logits = torch.empty(questions_input_ids.size(0), 8, device=self.device).fill_(float('-inf'))
-        cur_arr_idx = 0
-        for idx, sz in enumerate(num_ans):
-            answer_logits[idx, :sz] = -all_losses[cur_arr_idx:cur_arr_idx+sz]
-            cur_arr_idx += 8
-        answer_probs = answer_logits.softmax(axis=1)
+        answer_logitss = -all_losses.view(questions_input_ids.size(0), 8) # (B, K)
+        answer_probss = answer_logitss.softmax(axis=1)
 
         # Compute accuracy from argmax answer
-        preds = answer_probs.argmax(axis=1)
+        preds = answer_probss.argmax(axis=1)
         corrects = (preds == answer_ixs)
 
         return {
             'corrects': corrects,
             'preds': preds,
-            'answer_logits': answer_logits,
-            'answer_probs': answer_probs,
+            'answer_logitss': answer_logitss,
+            'answer_probss': answer_probss,
         }
 
     def eval(self, step):

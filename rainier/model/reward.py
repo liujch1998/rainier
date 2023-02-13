@@ -47,9 +47,9 @@ class Reward:
     def get_reward(self,
                    questions_input_ids: torch.tensor, # (B, QL)
                    questions_attention_mask: torch.tensor, # (B, QL)
-                   choicess_input_ids: torch.tensor, # (B, AL)
-                   choicess_attention_mask: torch.tensor, # (B, AL)
-                   choicess_labels: torch.tensor, # (B, AL)
+                   choicess_input_ids: torch.tensor, # (B, C, AL)
+                   choicess_attention_mask: torch.tensor, # (B, C, AL)
+                   choicess_labels: torch.tensor, # (B, C, AL)
                    answer_ixs: torch.tensor, # (B)
                    knowledges_input_ids: Optional[torch.tensor] = None, # (B, KL)
                    knowledges_attention_mask: Optional[torch.tensor] = None, # (B, KL)
@@ -69,8 +69,7 @@ class Reward:
                 prompts_attention_mask[b, questions_len[b]:questions_len[b]+3+knowledges_len[b]] = 1
 
         # Compute number of choices for each question, and flatten prompts accordingly
-        num_ans = torch.tensor([choices_input_ids.size(0) for choices_input_ids in choicess_input_ids], device=choicess_input_ids[0].device)
-        max_ans_num = num_ans.max().item()
+        num_ans = (choicess_labels[:, :, 0] != 1).long().sum(dim=1) # (B)
         flattened_prompts_input_ids = torch.repeat_interleave(prompts_input_ids, 8, dim=0) # (B * K, L)
         flattened_prompts_attention_mask = torch.repeat_interleave(prompts_attention_mask, 8, dim=0) # (B * K, L)
         flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * K, L)
@@ -105,12 +104,10 @@ class Reward:
             # Update all loss
             all_losses[i:j] = losses
 
+        all_losses[flattened_choices_labels[:, 0] == 1] = 1e9 # If the first token is [EOS], then the choice is padding
+
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logitss = torch.empty(prompts_input_ids.size(0), 8, device=self.device).fill_(float('-inf'))
-        cur_arr_idx = 0
-        for idx, sz in enumerate(num_ans):
-            answer_logitss[idx, :sz] = -all_losses[cur_arr_idx:cur_arr_idx+sz]
-            cur_arr_idx += sz
+        answer_logitss = -all_losses.view(questions_input_ids.size(0), 8) # (B, C)
         answer_probss = answer_logitss.softmax(axis=1)
 
         # Compute accuracy from argmax answer
@@ -290,9 +287,9 @@ class Reward:
     def get_reward_ensemble(self,
                             questions_input_ids: torch.tensor, # (B, QL)
                             questions_attention_mask: torch.tensor, # (B, QL)
-                            choicess_input_ids: torch.tensor, # (B, AL)
-                            choicess_attention_mask: torch.tensor, # (B, AL)
-                            choicess_labels: torch.tensor, # (B, AL)
+                            choicess_input_ids: torch.tensor, # (B, C, AL)
+                            choicess_attention_mask: torch.tensor, # (B, C, AL)
+                            choicess_labels: torch.tensor, # (B, C, AL)
                             answer_ixs: torch.tensor, # (B)
                             knowledgess_input_ids: torch.tensor, # (K, B, KL)
                             knowledgess_attention_mask: torch.tensor, # (K, B, KL)

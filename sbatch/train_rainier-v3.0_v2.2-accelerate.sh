@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_rainier-v3.0_v2.4-accelerate
+#SBATCH --job-name=train_rainier-v3.0_v2.2-accelerate
 #SBATCH --partition=learnlab
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_imitation-v3.5_v3.4.6
 #SBATCH --partition=learnlab
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
 #SBATCH --gpus-per-node=8
@@ -12,6 +12,7 @@
 cat $0
 echo "--------------------"
 
+time=$(date +"%Y%m%d-%H%M%S")
 srun --label sbatch/train_imitation-v3.5.sh.wrapper \
-    train_imitation-v3.5_v3.4.6 \
+    ${time}.${SLURM_JOB_ID}.${SLURM_JOB_NAME} \
     no large 4

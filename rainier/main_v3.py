@@ -2,6 +2,7 @@ import argparse
 from collections import defaultdict
 from itertools import chain
 import json
+import logging
 import numpy as np
 import os
 import random
@@ -27,6 +28,7 @@ from model.value import Value
 from model.reward import Reward
 from ppo import PPOTrainer
 
+logging.basicConfig(level=logging.INFO)
 log = accelerate.logging.get_logger(__name__, log_level='INFO')
 
 
@@ -163,11 +165,11 @@ class QADataset(Dataset):
         questions_input_ids = questions_tok.input_ids
         questions_attention_mask = questions_tok.attention_mask
 
-        padded_choicess = [item['choices'] + [''] * (8 - len(item['choices'])) for item in batch]
+        choicess = [item['choices'] + [''] * (8 - len(item['choices'])) for item in batch]
         choicess_tok = [self.tokenizer.batch_encode_plus(
-            padded_choices,
+            choices,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_answer_len)
-            for padded_choices in padded_choicess]
+            for choices in choicess]
         choicess_input_ids = torch.stack([choices_tok.input_ids for choices_tok in choicess_tok], dim=0)
         choicess_attention_mask = torch.stack([choices_tok.attention_mask for choices_tok in choicess_tok], dim=0)
         choicess_labels = choicess_input_ids.clone()
@@ -182,11 +184,18 @@ class QADataset(Dataset):
         answers_labels = answers_input_ids.clone()
         answers_labels[answers_attention_mask == 0] = -100
 
-        lowercased_padded_choicess = [[choice.lower() for choice in choices] for choices in padded_choicess]
+        lowercased_questions = [question.lower() for question in questions]
+        lowercased_questions_tok = self.tokenizer.batch_encode_plus(
+            lowercased_questions,
+            return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_question_len)
+        lowercased_questions_input_ids = lowercased_questions_tok.input_ids
+        lowercased_questions_attention_mask = lowercased_questions_tok.attention_mask
+
+        lowercased_choicess = [[choice.lower() for choice in choices] for choices in choicess]
         lowercased_choicess_tok = [self.tokenizer.batch_encode_plus(
             choices,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_answer_len)
-            for choices in lowercased_padded_choicess]
+            for choices in lowercased_choicess]
         lowercased_choicess_input_ids = torch.stack([choices_tok.input_ids for choices_tok in lowercased_choicess_tok], dim=0)
         lowercased_choicess_attention_mask = torch.stack([choices_tok.attention_mask for choices_tok in lowercased_choicess_tok], dim=0)
         lowercased_choicess_labels = lowercased_choicess_input_ids.clone()
@@ -210,6 +219,8 @@ class QADataset(Dataset):
             'choicess_attention_mask': choicess_attention_mask,
             'choicess_labels': choicess_labels,
             'answers_labels': answers_labels,
+            'lowercased_questions_input_ids': lowercased_questions_input_ids,
+            'lowercased_questions_attention_mask': lowercased_questions_attention_mask,
             'lowercased_choicess_input_ids': lowercased_choicess_input_ids,
             'lowercased_choicess_attention_mask': lowercased_choicess_attention_mask,
             'lowercased_choicess_labels': lowercased_choicess_labels,
@@ -247,14 +258,6 @@ class QADataset(Dataset):
             knowledgess_with_prefix_labels = knowledgess_with_prefix_input_ids.clone()
             knowledgess_with_prefix_labels[knowledgess_with_prefix_attention_mask == 0] = -100
 
-            # questions_knowledgess = [[f'{q} \\n {k}' for k in ks] for q, ks in zip(questions, knowledgess)]
-            # questions_knowledgess_tok = [self.tokenizer.batch_encode_plus(
-            #     questions_knowledges,
-            #     return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_question_len + self.tokenizer.max_knowledge_len)
-            #     for questions_knowledges in questions_knowledgess]
-            # questions_knowledgess_input_ids = torch.stack([questions_knowledges_tok.input_ids for questions_knowledges_tok in questions_knowledgess_tok], dim=0)
-            # questions_knowledgess_attention_mask = torch.stack([questions_knowledges_tok.attention_mask for questions_knowledges_tok in questions_knowledgess_tok], dim=0)
-
             result.update({
                 'knowledgess_input_ids': knowledgess_input_ids,
                 'knowledegss_attention_mask': knowledgess_attention_mask,
@@ -265,8 +268,6 @@ class QADataset(Dataset):
                 'knowledgess_with_prefix_input_ids': knowledgess_with_prefix_input_ids,
                 'knowledegss_with_prefix_attention_mask': knowledgess_with_prefix_attention_mask,
                 'knowledgess_with_prefix_labels': knowledgess_with_prefix_labels,
-                # 'question_knowledgess_input_ids': questions_knowledgess_input_ids,
-                # 'question_knowledgess_attention_mask': questions_knowledgess_attention_mask,
             })
         
         return result
@@ -404,29 +405,32 @@ class PPOTrainer:
         # Run value network
         with torch.no_grad(): # treat the values at beginning of step as ground-truth
             value_forward = self.value_model.forward_pass(**forward_inputs)
-            results['knowledges_value'] = value_forward['knowledges_value']#.to(self.policy_model.device)
+            results['knowledges_value'] = value_forward['knowledges_value']
             results['knowledges_value'] *= results['knowledges_attention_mask']  # TODO: I doubt if this line is necessary
 
         # Run ref policy
         with torch.no_grad():
             ref_policy_forward = self.ref_policy_model.forward_pass(**forward_inputs)
-            results['knowledges_ref_logits'] = ref_policy_forward['knowledges_logits']#.to(self.policy_model.device)
-            results['knowledges_ref_logprobs'] = ref_policy_forward['knowledges_logprobs']#.to(self.policy_model.device)
+            results['knowledges_ref_logits'] = ref_policy_forward['knowledges_logits']
+            results['knowledges_ref_logprobs'] = ref_policy_forward['knowledges_logprobs']
 
         # Get reward
         with torch.no_grad():
             reward_results = self.reward_model.get_reward(
-                questions_input_ids=batch['questions_input_ids'],
-                questions_attention_mask=batch['questions_attention_mask'],
-                choicess_input_ids=batch['choicess_input_ids'],
-                choicess_attention_mask=batch['choicess_attention_mask'],
-                choicess_labels=batch['choicess_labels'],
+                questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
                 answer_ixs=batch['answer_ixs'],
                 knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                 knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
             )
             results = {**results, **reward_results}
             self.reward_model.kl_penalize_reward(results)
+
+        if self.accelerator.is_main_process:
+            print(results)
 
         # Train
         # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
@@ -510,11 +514,11 @@ class PPOTrainer:
                 )
 
                 results = self.reward_model.get_reward(
-                    questions_input_ids=batch['questions_input_ids'],
-                    questions_attention_mask=batch['questions_attention_mask'],
-                    choicess_input_ids=batch['choicess_input_ids'],
-                    choicess_attention_mask=batch['choicess_attention_mask'],
-                    choicess_labels=batch['choicess_labels'],
+                    questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                    questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                    choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                    choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                    choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
                     answer_ixs=batch['answer_ixs'],
                     knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                     knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
@@ -601,15 +605,15 @@ class PPOTrainer:
                         knowledgess_input_ids = batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_input_ids']
                         knowledgess_attention_mask = batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_attention_mask']
 
-                results = self.reward_model.get_reward(
-                    questions_input_ids=batch['questions_input_ids'],
-                    questions_attention_mask=batch['questions_attention_mask'],
-                    choicess_input_ids=batch['choicess_input_ids'],
-                    choicess_attention_mask=batch['choicess_attention_mask'],
-                    choicess_labels=batch['choicess_labels'],
+                results = self.reward_model.get_reward_ensemble(
+                    questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                    questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                    choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                    choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                    choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
                     answer_ixs=batch['answer_ixs'],
-                    knowledges_input_ids=knowledgess_input_ids,
-                    knowledges_attention_mask=knowledgess_attention_mask,
+                    knowledgess_input_ids=knowledgess_input_ids,
+                    knowledgess_attention_mask=knowledgess_attention_mask,
                     override_bias=0,
                     override_gain=1,
                 )
@@ -695,11 +699,11 @@ class PPOTrainer:
                     temperature=self.args.temperature,
                 )
                 results = self.reward_model.get_reward(
-                    questions_input_ids=batch['questions_input_ids'],
-                    questions_attention_mask=batch['questions_attention_mask'],
-                    choicess_input_ids=batch['choicess_input_ids'],
-                    choicess_attention_mask=batch['choicess_attention_mask'],
-                    choicess_labels=batch['choicess_labels'],
+                    questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                    questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                    choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                    choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                    choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
                     answer_ixs=batch['answer_ixs'],
                     knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                     knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
