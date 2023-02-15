@@ -29,6 +29,10 @@ def reduce_std(value, mask):
     return torch.sqrt(reduce_mean(torch.square(value), mask) - torch.square(reduce_mean(value, mask)))
 
 
+def reduce_var(value, mask):
+    return reduce_mean(torch.square(value), mask) - torch.square(reduce_mean(value, mask))
+
+
 def logits_to_entropy(logits):
     distribution = torch.distributions.Categorical(logits=logits)
     return distribution.entropy()
@@ -55,8 +59,16 @@ def exact_div(a, b):
     return q
 
 
-def whiten(values, masks, shift_mean=True):
-    mean, var = reduce_mean(values, masks), reduce_std(values, masks)
+def whiten(values, masks, shift_mean=True, accelerator=None):
+    if accelerator is not None:
+        all_values = accelerator.gather(values) # (num_gpus * B, KL)
+        all_masks = accelerator.gather(masks) # (num_gpus * B, KL)
+        mean, var = reduce_mean(all_values, all_masks), reduce_std(all_values, all_masks)
+    else:
+        mean, var = reduce_mean(values, masks), reduce_std(values, masks)
+    # if accelerator is not None and accelerator.is_main_process:
+    #     print(f'all_values: {all_values}, all_masks: {all_masks}')
+    #     print(f'mean: {mean}, var: {var}')
     whitened = (values - mean) * torch.rsqrt(var + 1e-8)
     if not shift_mean:
         whitened += mean

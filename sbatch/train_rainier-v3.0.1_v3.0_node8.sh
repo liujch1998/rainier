@@ -15,4 +15,4 @@ echo "--------------------"
 time=$(date +"%Y%m%d-%H%M%S")
 srun --label sbatch/train_rainier-v3.0.sh.wrapper \
     ${time}.${SLURM_JOB_ID}.${SLURM_JOB_NAME} \
-    bf16
+    no

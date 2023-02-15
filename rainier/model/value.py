@@ -34,7 +34,7 @@ class Value:
                      knowledges_attention_mask: torch.Tensor, # (B, KL)
                     ):
 
-        outputs = self.model.module.forward_cls(
+        outputs = self.model.forward_cls(
             input_ids=questions_input_ids,
             attention_mask=questions_attention_mask,
             labels=mask_pad(knowledges_input_ids, knowledges_attention_mask, -100),

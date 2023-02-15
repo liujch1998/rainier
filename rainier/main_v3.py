@@ -11,6 +11,7 @@ from tqdm import tqdm
 from typing import Dict
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
@@ -327,22 +328,35 @@ class PPOTrainer:
         rewards = results['rewards/penalized']
         mask = results['knowledges_attention_mask']
 
+        all_mask = self.accelerator.gather(mask)
+        weight = mask.sum(dim=1).item() / all_mask.sum(dim=1).float().mean().item()
+
         with torch.no_grad():
+            # if self.accelerator.is_main_process:
+            #     log.info(f'original rewards: {rewards}')
             if self.args.whiten_rewards:
-                rewards = whiten(rewards, mask, shift_mean=False)
+                whitened_rewards = whiten(rewards, mask, shift_mean=False, accelerator=self.accelerator)
+            # if self.accelerator.is_main_process:
+            #     log.info(f'whitened rewards: {whitened_rewards}')
 
             lastgaelam = 0
             advantages_reversed = []
-            gen_length = rewards.size(1)
+            # gen_length = whitened_rewards.size(1)
+            gen_length = mask.sum(dim=1).max().item() # to match the original implementation in V1
             for t in reversed(range(gen_length)):
                 nextvalues = old_values[:, t + 1] if t < gen_length - 1 else 0.0
-                delta = rewards[:, t] + self.args.gamma * nextvalues - old_values[:, t]
+                delta = whitened_rewards[:, t] + self.args.gamma * nextvalues - old_values[:, t]
                 lastgaelam = delta + self.args.gamma * self.args.lam * lastgaelam
                 advantages_reversed.append(lastgaelam)
             advantages = torch.stack(advantages_reversed[::-1], dim=1)
+            advantages = F.pad(advantages, (0, whitened_rewards.size(1) - gen_length), value=0.0)
             returns = advantages + old_values
 
-            advantages = whiten(advantages, mask).detach()
+            # if self.accelerator.is_main_process:
+            #     log.info(f'original advantages: {advantages}')
+            whitened_advantages = whiten(advantages, mask, accelerator=self.accelerator).detach()
+            # if self.accelerator.is_main_process:
+            #     log.info(f'whitened advantages: {whitened_advantages}')
 
         forward_inputs = {
             'questions_input_ids': results['questions_input_ids'],
@@ -355,20 +369,31 @@ class PPOTrainer:
         new_logprobs = policy_forward['knowledges_logprobs']
 
         ratio = torch.exp(new_logprobs - old_logprobs)
-        pg_losses = -advantages * ratio
-        pg_losses2 = -advantages * torch.clamp(ratio, min=1.0 - self.args.cliprange, max=1.0 + self.args.cliprange)
-        pg_loss = reduce_mean(torch.max(pg_losses, pg_losses2), mask)
-        pg_clipfrac = reduce_mean(torch.gt(pg_losses2, pg_losses).float(), mask)
+        pg_losses1 = -whitened_advantages * ratio
+        pg_losses2 = -whitened_advantages * torch.clamp(ratio, min=1.0 - self.args.cliprange, max=1.0 + self.args.cliprange)
+        pg_loss = reduce_mean(torch.max(pg_losses1, pg_losses2), mask)
+        pg_loss = pg_loss * weight
+        # if pg_loss < -4.0:
+        #     print(f'process_index: {self.accelerator.process_index}')
+        #     print(f'pg_loss: {pg_loss}')
+        #     print(f'advantages: {whitened_advantages}')
+        #     print(f'ratio: {ratio}')
+        #     print(f'mask: {mask}')
+        # pg_clipfrac = reduce_mean(torch.gt(pg_losses2, pg_losses).float(), mask)
 
-        value_forward = self.value_model.forward_pass(**forward_inputs)
-        new_values = value_forward['knowledges_value']
-        new_values *= mask  # TODO: I doubt if this line is necessary
+        if self.args.policy_value_sharing:
+            new_values = policy_forward['knowledges_value']
+        else:
+            value_forward = self.value_model.forward_pass(**forward_inputs)
+            new_values = value_forward['knowledges_value']
+            new_values *= mask  # TODO: I doubt if this line is necessary
 
         new_values_clipped = clamp(new_values, old_values - self.args.cliprange_value, old_values + self.args.cliprange_value)
         vf_losses1 = torch.square(new_values - returns)
         vf_losses2 = torch.square(new_values_clipped - returns)
         vf_loss = .5 * reduce_mean(torch.max(vf_losses1, vf_losses2), mask)
-        vf_clipfrac = reduce_mean(torch.gt(vf_losses2, vf_losses1).float(), mask)
+        vf_loss = vf_loss * weight
+        # vf_clipfrac = reduce_mean(torch.gt(vf_losses2, vf_losses1).float(), mask)
 
         loss = self.args.pg_coef * pg_loss + self.args.vf_coef * vf_loss
 
@@ -402,11 +427,16 @@ class PPOTrainer:
             'knowledges_attention_mask': results['knowledges_attention_mask'],
         }
 
+        with torch.no_grad():
+            policy_forward = self.policy_model.forward_pass(**forward_inputs)
+            results.update(policy_forward)
+
         # Run value network
-        with torch.no_grad(): # treat the values at beginning of step as ground-truth
-            value_forward = self.value_model.forward_pass(**forward_inputs)
-            results['knowledges_value'] = value_forward['knowledges_value']
-            results['knowledges_value'] *= results['knowledges_attention_mask']  # TODO: I doubt if this line is necessary
+        if not self.args.policy_value_sharing:
+            with torch.no_grad(): # treat the values at beginning of step as ground-truth
+                value_forward = self.value_model.forward_pass(**forward_inputs)
+                results['knowledges_value'] = value_forward['knowledges_value']
+                results['knowledges_value'] *= results['knowledges_attention_mask']  # TODO: I doubt if this line is necessary
 
         # Run ref policy
         with torch.no_grad():
@@ -426,11 +456,12 @@ class PPOTrainer:
                 knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                 knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
             )
-            results = {**results, **reward_results}
+            results.update(reward_results)
             self.reward_model.kl_penalize_reward(results)
 
-        if self.accelerator.is_main_process:
-            print(results)
+        # if self.accelerator.is_main_process:
+        #     for k, v in results.items():
+        #         log.info(f'{k}: {v}')
 
         # Train
         # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
@@ -459,6 +490,8 @@ class PPOTrainer:
         corrects = self.accelerator.gather(results['corrects']) # (num_gpus * B)
         losses_total = self.accelerator.gather(loss_total) # (num_gpus)
         losses_policy = self.accelerator.gather(loss_policy) # (num_gpus)
+        # if self.accelerator.is_main_process:
+        #     log.info(f'losses_policy: {losses_policy}')
         losses_value = self.accelerator.gather(loss_value) # (num_gpus)
         rewards_penalized = self.accelerator.gather(reward_penalized) # (num_gpus)
         rewards_kl = self.accelerator.gather(reward_kl) # (num_gpus)
@@ -468,6 +501,8 @@ class PPOTrainer:
         acc = corrects.float().mean().item()
         loss_total = losses_total.mean().item()
         loss_policy = losses_policy.mean().item()
+        # if self.accelerator.is_main_process:
+        #     log.info(f'loss_policy: {loss_policy}')
         loss_value = losses_value.mean().item()
         reward_penalized = rewards_penalized.mean().item()
         reward_kl = rewards_kl.mean().item()
@@ -734,12 +769,14 @@ class PPOTrainer:
             save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             with FSDP.state_dict_type(self.policy_model.model, StateDictType.FULL_STATE_DICT, save_policy):
                 policy_model_state_dict = self.policy_model.model.state_dict()
+                policy_linear_state_dict = self.policy_model.linear.state_dict()
             if not self.args.policy_value_sharing:
                 with FSDP.state_dict_type(self.value_model.model, StateDictType.FULL_STATE_DICT, save_policy):
                     value_model_state_dict = self.value_model.model.state_dict()
         else:
             # TODO: test this!!
             policy_model_state_dict = self.accelerator.unwrap_model(self.policy_model.model).state_dict()
+            policy_linear_state_dict = self.accelerator.unwrap_model(self.policy_model.linear).state_dict()
             if not self.args.policy_value_sharing:
                 value_model_state_dict = self.accelerator.unwrap_model(self.value_model.model).state_dict()
         # TODO: Make optimizer state loading work
@@ -747,6 +784,7 @@ class PPOTrainer:
         # scheduler_state_dict = self.scheduler.state_dict()
         result = {
             'model': policy_model_state_dict,
+            'linear': policy_linear_state_dict,
             # 'optimizer': optimizer_state_dict,
             # 'scheduler': scheduler_state_dict,
             'step': step,
@@ -847,8 +885,9 @@ def main():
             policy_value_sharing=args.policy_value_sharing,
             policy_reward_sharing=args.policy_reward_sharing,
             device=device,
+            accelerator=accelerator,
         )
-        ref_policy.model = accelerator.prepare(ref_policy.model)
+        ref_policy.model, ref_policy.linear = accelerator.prepare(ref_policy.model, ref_policy.linear)
         policy = Policy(
             model_type=args.model_type,
             model_ckpt=args.model_ckpt,
@@ -856,8 +895,9 @@ def main():
             policy_value_sharing=args.policy_value_sharing,
             policy_reward_sharing=args.policy_reward_sharing,
             device=device,
+            accelerator=accelerator,
         )
-        policy.model = accelerator.prepare(policy.model)
+        policy.model, policy.linear = accelerator.prepare(policy.model, policy.linear)
         value = Value(
             model_type=args.model_type,
             model_ckpt=args.model_ckpt if args.use_model_ckpt_for_value else None,
@@ -884,9 +924,9 @@ def main():
 
         # We never need to optimize the reward model's parameters separately!
         if args.policy_value_sharing:
-            parameters = policy.model.parameters()
+            parameters = chain(policy.model.parameters(), policy.linear.parameters())
         else:
-            parameters = chain(policy.model.parameters(), value.model.parameters())
+            parameters = chain(policy.model.parameters(), policy.linear.parameters(), value.model.parameters())
         optimizer = torch.optim.Adam(parameters, lr=args.lr, eps=1e-5)
         args.total_steps = ceil_div(args.total_episodes, args.batch_size * int(os.environ['SLURM_GPUS_ON_NODE']) * int(os.environ['SLURM_JOB_NUM_NODES']))
         warmup_steps = np.ceil(args.num_warmup_step_ratio * args.total_steps)
@@ -920,6 +960,7 @@ def main():
             policy_value_sharing=args.policy_value_sharing,
             policy_reward_sharing=args.policy_reward_sharing,
             device=device,
+            accelerator=accelerator,
         )
         optimizer = None
         scheduler = None
@@ -929,7 +970,8 @@ def main():
         checkpoint = None
         if args.load_from_ckpt is not None:
             checkpoint = torch.load(args.load_from_ckpt, map_location='cpu')
-            policy.model.load_state_dict(checkpoint['model'], strict=False) 
+            policy.model.load_state_dict(checkpoint['model'], strict=False)
+            policy.linear.load_state_dict(checkpoint['linear'])
             init_step = checkpoint['step']
             checkpoint.clear()
         elif args.eval_ckpt is not None:
@@ -937,7 +979,7 @@ def main():
             policy.model.load_state_dict(checkpoint, strict=False)
             checkpoint.clear()
 
-        policy.model = accelerator.prepare(policy.model)
+        policy.model, policy.linear = accelerator.prepare(policy.model, policy.linear)
 
         value = None
         reward = Reward(

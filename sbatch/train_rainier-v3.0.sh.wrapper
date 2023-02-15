@@ -21,4 +21,4 @@ accelerate launch \
     main_v3.py \
     --mode train --use_model_ckpt_for_value --policy_value_sharing --batch_size 1 \
     --gain 3.575475037847048 --bias 0.032954977862281395 \
-    --run_name $1 --nosave --eval_loop_cap 0
+    --run_name $1 --eval_loop_cap 0

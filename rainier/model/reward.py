@@ -58,15 +58,16 @@ class Reward:
                    skip_reward = False,
                   ):
         questions_len = questions_attention_mask.long().sum(dim=1)
-        prompts_input_ids = F.pad(questions_input_ids, (0, self.tokenizer.max_knowledge_len + 3), value=self.tokenizer.pad_token_id)
-        prompts_attention_mask = F.pad(questions_attention_mask, (0, self.tokenizer.max_knowledge_len + 3), value=0)
+        prompts_input_ids = F.pad(questions_input_ids, (0, self.tokenizer.max_knowledge_len + 2), value=self.tokenizer.pad_token_id)
+        prompts_attention_mask = F.pad(questions_attention_mask, (0, self.tokenizer.max_knowledge_len + 2), value=0)
         if knowledges_input_ids is not None and knowledges_attention_mask is not None:
             B = questions_input_ids.size(0)
             knowledges_len = knowledges_attention_mask.long().sum(dim=1)
             for b in range(B):
-                prompts_input_ids[b, questions_len[b]:questions_len[b]+3] = torch.tensor([3, 2, 29], dtype=torch.long, device=questions_input_ids.device)
-                prompts_input_ids[b, questions_len[b]+3:questions_len[b]+3+knowledges_len[b]] = knowledges_input_ids[b, :knowledges_len[b]]
-                prompts_attention_mask[b, questions_len[b]:questions_len[b]+3+knowledges_len[b]] = 1
+                prompts_input_ids[b, questions_len[b]-1:questions_len[b]+2] = torch.tensor([3, 2, 29], dtype=torch.long, device=questions_input_ids.device)
+                prompts_input_ids[b, questions_len[b]+2:questions_len[b]+2+knowledges_len[b]] = knowledges_input_ids[b, :knowledges_len[b]]
+                prompts_attention_mask[b, questions_len[b]-1:questions_len[b]+2+knowledges_len[b]] = 1
+        prompts_text = self.tokenizer.batch_decode(prompts_input_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
 
         # Compute number of choices for each question, and flatten prompts accordingly
         num_ans = (choicess_labels[:, :, 0] != 1).long().sum(dim=1) # (B)
@@ -120,6 +121,9 @@ class Reward:
                 'preds': preds,
                 'answer_logitss': answer_logitss, # (B, C)
                 'answer_probss': answer_probss, # (B, C)
+                'prompts_text': prompts_text,
+                'prompts_input_ids': prompts_input_ids,
+                'prompts_attention_mask': prompts_attention_mask,
             }
 
         # Probabilities of the gt answer
@@ -260,6 +264,9 @@ class Reward:
             'preds': preds, # (B)
             'answer_logitss': answer_logitss, # (B, C)
             'answer_probss': answer_probss, # (B, C)
+            'prompts_text': prompts_text,
+            'prompts_input_ids': prompts_input_ids,
+            'prompts_attention_mask': prompts_attention_mask,
             'rewards/raw': rewards, # (B)
             'rewards/normalized': rewards_normalized, # (B)
         }
