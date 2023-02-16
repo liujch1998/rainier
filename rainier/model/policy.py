@@ -14,13 +14,11 @@ class Policy:
                  tokenizer,
                  policy_value_sharing: bool,
                  policy_reward_sharing: bool,
-                 device,
                  accelerator,
                 ):
         self.tokenizer = tokenizer
         self.policy_value_sharing = policy_value_sharing
         self.policy_reward_sharing = policy_reward_sharing
-        self.device = device
         self.accelerator = accelerator
 
         # if policy_value_sharing:

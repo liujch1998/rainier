@@ -29,8 +29,13 @@ from model.value import Value
 from model.reward import Reward
 from ppo import PPOTrainer
 
+accelerator = accelerate.Accelerator()
+device = accelerator.device
 logging.basicConfig(level=logging.INFO)
 log = accelerate.logging.get_logger(__name__, log_level='INFO')
+def log_info(s):
+    if accelerator.is_main_process:
+        log.info(s)
 
 
 datapath_by_task_and_split = {
@@ -126,7 +131,7 @@ class QADataset(Dataset):
                             'answer': a,
                             'answer_ix': answer_ix,
                         })
-                log.info(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
+                log_info(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
         elif self.data_path.endswith('.json'):
             for task_ix, task in enumerate(self.tasks):
                 skipped = 0
@@ -150,8 +155,8 @@ class QADataset(Dataset):
                             'answer_ix': answer_ix,
                             'knowledges': knowledges,
                         })
-                log.info(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
-        log.info(f'Loaded split {self.split} with {len(instances)} total instances')
+                log_info(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
+        log_info(f'Loaded split {self.split} with {len(instances)} total instances')
         return instances
 
     # Make a collate function to fix dataloader weird list batching
@@ -286,8 +291,6 @@ class PPOTrainer:
                  optimizer: torch.optim.Optimizer,
                  init_step: int,
                  eval_accs: Dict,
-                 device,
-                 accelerator,
                 ):
         self.args = args
         self.train_dataloader = train_dataloader
@@ -297,11 +300,9 @@ class PPOTrainer:
         self.value_model = value_model
         self.reward_model = reward_model
         self.optimizer = optimizer
-        self.device = device
-        self.accelerator = accelerator
 
         if self.args.mode == 'train':
-            if not args.nosave and self.accelerator.is_main_process:
+            if not args.nolog and accelerator.is_main_process:
                 wandb.init(project='rainier_stageII', name=args.run_name, config=args)
                 wandb.define_metric('train/step')
                 wandb.define_metric('eval/step')
@@ -315,7 +316,7 @@ class PPOTrainer:
             self.eval_accs = eval_accs
 
         elif self.args.mode == 'eval':
-            if not args.nosave and self.accelerator.is_main_process:
+            if not args.nolog and accelerator.is_main_process:
                 wandb.init(project='rainier_eval', name=args.run_name, config=args)
                 wandb.define_metric('eval/step')
                 wandb.define_metric('eval/*', step_metric='eval/step')
@@ -326,15 +327,15 @@ class PPOTrainer:
         rewards = results['rewards/penalized']
         mask = results['knowledges_attention_mask'] # (B, KL)
 
-        all_mask = self.accelerator.gather(mask) # (num_gpus * B, KL)
+        all_mask = accelerator.gather(mask) # (num_gpus * B, KL)
         weight = mask.sum(dim=1).float().mean().item() / all_mask.sum(dim=1).float().mean().item()
 
         with torch.no_grad():
-            # if self.accelerator.is_main_process:
+            # if accelerator.is_main_process:
             #     log.info(f'original rewards: {rewards}')
             if self.args.whiten_rewards:
-                whitened_rewards = whiten(rewards, mask, shift_mean=False, accelerator=self.accelerator)
-            # if self.accelerator.is_main_process:
+                whitened_rewards = whiten(rewards, mask, shift_mean=False, accelerator=accelerator)
+            # if accelerator.is_main_process:
             #     log.info(f'whitened rewards: {whitened_rewards}')
 
             lastgaelam = 0
@@ -350,10 +351,10 @@ class PPOTrainer:
             advantages = F.pad(advantages, (0, whitened_rewards.size(1) - gen_length), value=0.0)
             returns = advantages + old_values
 
-            # if self.accelerator.is_main_process:
+            # if accelerator.is_main_process:
             #     log.info(f'original advantages: {advantages}')
-            whitened_advantages = whiten(advantages, mask, accelerator=self.accelerator).detach()
-            # if self.accelerator.is_main_process:
+            whitened_advantages = whiten(advantages, mask, accelerator=accelerator).detach()
+            # if accelerator.is_main_process:
             #     log.info(f'whitened advantages: {whitened_advantages}')
 
         forward_inputs = {
@@ -372,7 +373,7 @@ class PPOTrainer:
         pg_loss = reduce_mean(torch.max(pg_losses1, pg_losses2), mask)
         pg_loss = pg_loss * weight
         # if pg_loss < -4.0:
-        #     print(f'process_index: {self.accelerator.process_index}')
+        #     print(f'process_index: {accelerator.process_index}')
         #     print(f'pg_loss: {pg_loss}')
         #     print(f'advantages: {whitened_advantages}')
         #     print(f'ratio: {ratio}')
@@ -403,7 +404,7 @@ class PPOTrainer:
         self.save(step=step)
         self.valid(step=step)
 
-        accelerate.utils.wait_for_everyone()
+        accelerator.wait_for_everyone()
         try:
             batch = next(self.train_sampler)
         except StopIteration:
@@ -457,7 +458,7 @@ class PPOTrainer:
             results.update(reward_results)
             self.reward_model.kl_penalize_reward(results)
 
-        # if self.accelerator.is_main_process:
+        # if accelerator.is_main_process:
         #     for k, v in results.items():
         #         log.info(f'{k}: {v}')
 
@@ -466,7 +467,7 @@ class PPOTrainer:
         for ppo_epoch_idx in range(self.args.noptepochs):
             self.optimizer.zero_grad()
             self.loss(results)
-            self.accelerator.backward(results['loss/total'])
+            accelerator.backward(results['loss/total'])
             if self.args.clip_grad:
                 torch.nn.utils.clip_grad_norm_(
                     chain(self.policy_model.model.parameters(),
@@ -482,21 +483,21 @@ class PPOTrainer:
         reward_normalized = results['rewards/normalized'].mean(dim=0, keepdim=True) # (1)
         reward_raw = results['rewards/raw'].mean(dim=0, keepdim=True) # (1)
 
-        corrects = self.accelerator.gather(results['corrects']) # (num_gpus * B)
-        losses_total = self.accelerator.gather(loss_total) # (num_gpus)
-        losses_policy = self.accelerator.gather(loss_policy) # (num_gpus)
-        # if self.accelerator.is_main_process:
+        corrects = accelerator.gather(results['corrects']) # (num_gpus * B)
+        losses_total = accelerator.gather(loss_total) # (num_gpus)
+        losses_policy = accelerator.gather(loss_policy) # (num_gpus)
+        # if accelerator.is_main_process:
         #     log.info(f'losses_policy: {losses_policy}')
-        losses_value = self.accelerator.gather(loss_value) # (num_gpus)
-        rewards_penalized = self.accelerator.gather(reward_penalized) # (num_gpus)
-        rewards_kl = self.accelerator.gather(reward_kl) # (num_gpus)
-        rewards_normalized = self.accelerator.gather(reward_normalized) # (num_gpus)
-        rewards_raw = self.accelerator.gather(reward_raw) # (num_gpus)
+        losses_value = accelerator.gather(loss_value) # (num_gpus)
+        rewards_penalized = accelerator.gather(reward_penalized) # (num_gpus)
+        rewards_kl = accelerator.gather(reward_kl) # (num_gpus)
+        rewards_normalized = accelerator.gather(reward_normalized) # (num_gpus)
+        rewards_raw = accelerator.gather(reward_raw) # (num_gpus)
 
         acc = corrects.float().mean().item()
         loss_total = losses_total.mean().item()
         loss_policy = losses_policy.mean().item()
-        # if self.accelerator.is_main_process:
+        # if accelerator.is_main_process:
         #     log.info(f'loss_policy: {loss_policy}')
         loss_value = losses_value.mean().item()
         reward_penalized = rewards_penalized.mean().item()
@@ -505,7 +506,7 @@ class PPOTrainer:
         reward_raw = rewards_raw.mean().item()
 
         # Logging
-        if not self.args.nosave and self.accelerator.is_main_process:
+        if not self.args.nolog and accelerator.is_main_process:
             if step % self.args.log_interval == 0:
                 wandb.log({
                     'train/step': step,
@@ -526,14 +527,14 @@ class PPOTrainer:
             return
         if step in self.eval_accs:
             return
-        log.info(f'Evaluating [step {step}] ...')
+        log_info(f'Evaluating [step {step}] ...')
 
-        accelerate.utils.wait_for_everyone()
+        accelerator.wait_for_everyone()
 
         with torch.no_grad():
             corrects, task_ixs = [], []
             # results_table = wandb.Table(columns=['step', 'id', 'task', 'question', 'knowledge', 'pred', 'answer_ix', 'correct'])
-            for i, batch in enumerate(tqdm(self.eval_dataloader)):
+            for i, batch in enumerate(tqdm(self.eval_dataloader) if accelerator.is_main_process else self.eval_dataloader):
                 if self.args.eval_loop_cap is not None and i == self.args.eval_loop_cap:
                     break
 
@@ -563,8 +564,8 @@ class PPOTrainer:
         corrects = torch.cat(corrects, dim=0) # (N)
         task_ixs = torch.cat(task_ixs, dim=0) # (N)
 
-        corrects = self.accelerator.gather(corrects) # (num_gpus * N)
-        task_ixs = self.accelerator.gather(task_ixs) # (num_gpus * N)
+        corrects = accelerator.gather(corrects) # (num_gpus * N)
+        task_ixs = accelerator.gather(task_ixs) # (num_gpus * N)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
         corrects = corrects[:len(self.eval_dataloader.dataset)]
@@ -579,12 +580,12 @@ class PPOTrainer:
         acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
 
-        log.info(f'Evaluated [step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
-        log.info('Accuracy by task:')
+        log_info(f'Evaluated [step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
+        log_info('Accuracy by task:')
         for task, acc in acc_by_task.items():
-            log.info(f'\t{task} = {acc:.4f}')
+            log_info(f'\t{task} = {acc:.4f}')
 
-        if not self.args.nosave and self.accelerator.is_main_process:
+        if not self.args.nolog and accelerator.is_main_process:
             stats = {
                 'eval/step': step,
                 # 'eval/results_table': results_table,
@@ -595,6 +596,7 @@ class PPOTrainer:
                 stats[f'eval/acc/{task}'] = acc
             wandb.log(stats)
 
+        if not self.args.nosave and accelerator.is_main_process:
             prev_best_step = None if len(self.eval_accs) == 0 else max(self.eval_accs, key=self.eval_accs.get)
             self.eval_accs[step] = acc_unweighted
             if prev_best_step is None or acc_unweighted > self.eval_accs[prev_best_step]:
@@ -604,20 +606,20 @@ class PPOTrainer:
                     except:
                         log.warning(f'Cannot remove previous best ckpt!')
                 shutil.copy(f'{self.args.model_dir}/last.pth', f'{self.args.model_dir}/ckp_{step}.pth')
-                log.info(f'Best ckpt updated to [step {step}]')
+                log_info(f'Best ckpt updated to [step {step}]')
         else:
             self.eval_accs[step] = acc_unweighted
 
     def eval(self, step): # step=-1 for baseline
-        log.info(f'Evaluating [step {step}] ...')
+        log_info(f'Evaluating [step {step}] ...')
 
-        accelerate.utils.wait_for_everyone()
+        accelerator.wait_for_everyone()
 
         with torch.no_grad():
             corrects, task_ixs = [], []
             knowledge_outputs = []
             inference_outputs = []
-            for i, batch in enumerate(tqdm(self.eval_dataloader)):
+            for i, batch in enumerate(tqdm(self.eval_dataloader) if accelerator.is_main_process else self.eval_dataloader):
                 knowledgess_input_ids, knowledgess_attention_mask = [], [] # [K * (B, KL)]
                 if step != -1: # If not baseline, generate knowledge
                     if 'knowledges' not in batch:
@@ -674,8 +676,8 @@ class PPOTrainer:
         corrects = torch.cat(corrects, dim=0) # (N)
         task_ixs = torch.cat(task_ixs, dim=0) # (N)
 
-        corrects = self.accelerator.gather(corrects) # (num_gpus * N)
-        task_ixs = self.accelerator.gather(task_ixs) # (num_gpus * N)
+        corrects = accelerator.gather(corrects) # (num_gpus * N)
+        task_ixs = accelerator.gather(task_ixs) # (num_gpus * N)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
         corrects = corrects[:len(self.eval_dataloader.dataset)]
@@ -690,12 +692,12 @@ class PPOTrainer:
         acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
 
-        log.info(f'Evaluated [step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
-        log.info('Accuracy by task:')
+        log_info(f'Evaluated [step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
+        log_info('Accuracy by task:')
         for task, acc in acc_by_task.items():
-            log.info(f'\t{task} = {acc:.4f}')
+            log_info(f'\t{task} = {acc:.4f}')
 
-        if not self.args.nosave and self.accelerator.is_main_process:
+        if not self.args.nolog and accelerator.is_main_process:
             stats = {
                 'eval/step': step,
                 'eval/acc_weighted': acc_weighted,
@@ -705,6 +707,7 @@ class PPOTrainer:
                 stats[f'eval/acc/{task}'] = acc
             wandb.log(stats)
 
+        if not self.args.nosave and accelerator.is_main_process:
             knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
             inference_path = os.path.join(self.args.inference_dir, f'inference_rainier-ckp{step}.knowledge_rainier-ckp{step}.json')
             with open(knowledge_path, 'w') as f:
@@ -716,11 +719,11 @@ class PPOTrainer:
     Internally set bias and gain terms based on the data from the dataloader
     """
     def set_reward_norm(self):
-        accelerate.utils.wait_for_everyone()
+        accelerator.wait_for_everyone()
 
         with torch.no_grad():
             rewards = []
-            for i, batch in enumerate(tqdm(self.train_dataloader)):
+            for i, batch in enumerate(tqdm(self.train_dataloader) if accelerator.is_main_process else self.train_dataloader):
                 if self.args.eval_loop_cap is not None and i == self.args.eval_loop_cap:
                     break
                 results = self.policy_model.sample(
@@ -743,7 +746,7 @@ class PPOTrainer:
                 rewards.append(results['rewards/raw'])
 
         rewards = torch.cat(rewards, dim=0) # (N)
-        rewards = self.accelerator.gather(rewards) # (num_gpus * N)
+        rewards = accelerator.gather(rewards) # (num_gpus * N)
         rewards = rewards[:len(self.train_dataloader.dataset)] # remove padding
 
         old_mean, old_std = rewards.mean().item(), rewards.std().item()
@@ -751,7 +754,7 @@ class PPOTrainer:
         self.reward_model.gain = new_std / old_std
         self.reward_model.bias = new_mean - self.reward_model.gain * old_mean
 
-        log.info(f'Reward normalization coefficients set to: gain = {self.reward_model.gain:.4f} | bias = {self.reward_model.bias:.4f}')
+        log_info(f'Reward normalization coefficients set to: gain = {self.reward_model.gain:.4f} | bias = {self.reward_model.bias:.4f}')
 
     def save(self, step):
         if self.args.nosave:
@@ -759,8 +762,8 @@ class PPOTrainer:
         if step % self.args.save_interval != 0:
             return
         # this will overwrite an existing ckpt with the save filename!
-        accelerate.utils.wait_for_everyone()
-        if self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP:
+        accelerator.wait_for_everyone()
+        if accelerator.distributed_type == accelerate.utils.DistributedType.FSDP:
             save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             with FSDP.state_dict_type(self.policy_model.model, StateDictType.FULL_STATE_DICT, save_policy):
                 policy_model_state_dict = self.policy_model.model.state_dict()
@@ -770,11 +773,10 @@ class PPOTrainer:
                 with FSDP.state_dict_type(self.value_model.model, StateDictType.FULL_STATE_DICT, save_policy):
                     value_model_state_dict = self.value_model.model.state_dict()
         else:
-            # TODO: test this!!
-            policy_model_state_dict = self.accelerator.unwrap_model(self.policy_model.model).state_dict()
-            policy_linear_state_dict = self.accelerator.unwrap_model(self.policy_model.linear).state_dict()
+            policy_model_state_dict = accelerator.unwrap_model(self.policy_model.model).state_dict()
+            policy_linear_state_dict = accelerator.unwrap_model(self.policy_model.linear).state_dict()
             if not self.args.policy_value_sharing:
-                value_model_state_dict = self.accelerator.unwrap_model(self.value_model.model).state_dict()
+                value_model_state_dict = accelerator.unwrap_model(self.value_model.model).state_dict()
         # TODO: Make optimizer state loading work
         # optimizer_state_dict = self.optimizer.state_dict()
         result = {
@@ -786,18 +788,14 @@ class PPOTrainer:
         }
         if not self.args.policy_value_sharing:
             result['value_model'] = value_model_state_dict
-        self.accelerator.save(result, f'{self.args.model_dir}/last.pth')
-        log.info(f'[step {step}] model checkpoint saved')
+        accelerator.save(result, f'{self.args.model_dir}/last.pth')
+        log_info(f'[step {step}] model checkpoint saved')
 
 
 def main():
     args = get_args()
 
     set_seed(args.seed, args.cuda_deterministic)
-
-    # GPUs
-    accelerator = accelerate.Accelerator()
-    device = accelerator.device
 
     # Set up save directories
     if not args.nosave:
@@ -834,13 +832,13 @@ def main():
                 for d in [args.save_dir, args.knowledge_dir, args.inference_dir]:
                     ensure_dir(d)
 
-        log.info(f'Write to output directory: {args.save_dir}')
+        log_info(f'Write to output directory: {args.save_dir}')
         if accelerator.is_main_process:
             with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
                 json.dump(args.__dict__, f, indent=2)
 
     # Load data
-    log.info(f'Loading data ...')
+    log_info(f'Loading data ...')
 
     tokenizer = transformers.T5Tokenizer.from_pretrained(args.model_type)
     tokenizer.max_question_len = args.max_question_len
@@ -851,11 +849,9 @@ def main():
         train_dataset = QADataset(args, 'train', args.train_tasks, args.data_path, tokenizer)
         # train ds is shuffled in its constructor
         train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=train_dataset.collate_fn)
-        log.info(f'Loaded train set with {len(train_dataset)} instances')
 
         eval_dataset = QADataset(args, 'dev', args.train_tasks, args.data_path, tokenizer)
         eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=eval_dataset.collate_fn)
-        log.info(f'Loaded dev set with {len(eval_dataset)} instances')
 
         train_dataloader, eval_dataloader = accelerator.prepare(train_dataloader, eval_dataloader)
 
@@ -865,12 +861,11 @@ def main():
 
         eval_dataset = QADataset(args, args.eval_split, args.eval_tasks, args.data_path, tokenizer)
         eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=eval_dataset.collate_fn)
-        log.info(f'Loaded {args.eval_split} set with {len(eval_dataset)} instances')
 
         eval_dataloader = accelerator.prepare(eval_dataloader)
 
     # Initialize models and optimizer
-    log.info(f'Initializing models ...')
+    log_info(f'Initializing models ...')
     if args.mode == 'train':
         ref_policy = Policy(
             model_type=args.model_type,
@@ -878,7 +873,6 @@ def main():
             tokenizer=tokenizer,
             policy_value_sharing=args.policy_value_sharing,
             policy_reward_sharing=args.policy_reward_sharing,
-            device=device,
             accelerator=accelerator,
         )
         ref_policy.model, ref_policy.linear = accelerator.prepare(ref_policy.model, ref_policy.linear)
@@ -888,7 +882,6 @@ def main():
             tokenizer=tokenizer,
             policy_value_sharing=args.policy_value_sharing,
             policy_reward_sharing=args.policy_reward_sharing,
-            device=device,
             accelerator=accelerator,
         )
         policy.model, policy.linear = accelerator.prepare(policy.model, policy.linear)
@@ -897,7 +890,6 @@ def main():
             model_ckpt=args.model_ckpt if args.use_model_ckpt_for_value else None,
             model=policy.model if args.policy_value_sharing else None,
             tokenizer=tokenizer,
-            device=device,
         )
         if not args.policy_value_sharing:
             value.model = accelerator.prepare(value.model)
@@ -911,7 +903,6 @@ def main():
             kl_coef=args.kl_coef,
             ensembling=args.ensembling,
             do_not_lowercase=args.do_not_lowercase,
-            device=device,
         )
         if not args.policy_reward_sharing:
             reward.model = accelerator.prepare(reward.model)
@@ -956,7 +947,6 @@ def main():
             tokenizer=tokenizer,
             policy_value_sharing=args.policy_value_sharing,
             policy_reward_sharing=args.policy_reward_sharing,
-            device=device,
             accelerator=accelerator,
         )
         optimizer = None
@@ -986,7 +976,6 @@ def main():
             kl_coef=args.kl_coef,
             ensembling=args.ensembling,
             do_not_lowercase=args.do_not_lowercase,
-            device=device,
         )
 
     # Set up trainer
@@ -1001,20 +990,18 @@ def main():
         optimizer=optimizer,
         init_step=init_step,
         eval_accs=eval_accs,
-        device=device,
-        accelerator=accelerator,
     )
 
     # Normalize the rewards to so that initially they have mean 0, var 1
     if args.mode == 'train':
         if args.load_from_ckpt is None:
-            log.info('Setting reward norm')
+            log_info('Setting reward norm')
             if args.gain is not None and args.bias is not None:
                 reward.gain = args.gain
                 reward.bias = args.bias
             else:
                 trainer.set_reward_norm()
-            log.info(f'Set reward norm as gain = {reward.gain}, bias = {reward.bias}')
+            log_info(f'Set reward norm as gain = {reward.gain}, bias = {reward.bias}')
             if not args.nosave and accelerator.is_main_process:
                 reward.write_reward_norm(args.reward_dir)
 
@@ -1024,8 +1011,9 @@ def main():
 
     # Train or evaluate
     if args.mode == 'train':
-        pbar = tqdm(list(range(init_step, args.total_steps + 1)))
-        for step in pbar:
+        steps = list(range(init_step, args.total_steps + 1))
+        steps = tqdm(steps) if accelerator.is_main_process else steps
+        for step in steps:
             trainer.train(step)
     elif args.mode == 'eval':
         trainer.eval(init_step)

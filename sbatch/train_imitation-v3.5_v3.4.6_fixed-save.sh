@@ -9,10 +9,13 @@
 #SBATCH --time=72:00:00
 #SBATCH --output="/private/home/ljc/rainier/logs/%J.%x.out"
 
+wrapper="sbatch/train_imitation-v3.5.sh.wrapper"
 cat $0
+echo "--------------------"
+cat $wrapper
 echo "--------------------"
 
 time=$(date +"%Y%m%d-%H%M%S")
-srun --label sbatch/train_imitation-v3.5.sh.wrapper \
+srun --label ${wrapper} \
     ${time}.${SLURM_JOB_ID}.${SLURM_JOB_NAME} \
     no large 4

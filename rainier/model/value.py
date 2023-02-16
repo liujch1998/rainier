@@ -10,10 +10,8 @@ class Value:
                  model_ckpt,
                  model,
                  tokenizer,
-                 device,
                 ):
         self.tokenizer = tokenizer
-        self.device = device
 
         if model is not None:
             self.model = model

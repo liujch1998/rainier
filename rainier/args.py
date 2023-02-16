@@ -110,11 +110,10 @@ def get_args():
         '--save_interval', type=int, default=500, help='step interval to save model checkpoints')
     parser.add_argument(
         '--eval_interval', type=int, default=500, help='step interval to do evaluation')
-    parser.add_argument(
-        '--nosave', default=False, action='store_true')
     parser.add_argument('--run_name', type=str, default=None)
-    parser.add_argument(
-        '--eval_loop_cap', type=int, default=None, help='cap on number of eval loops')
+    parser.add_argument('--nosave', default=False, action='store_true')
+    parser.add_argument('--nolog', default=False, action='store_true')
+    parser.add_argument('--eval_loop_cap', type=int, default=None, help='cap on number of eval loops')
 
     parser.add_argument(
         '--eval_baseline', action='store_true', help='whether to evaluate the no-knowledge baseline')

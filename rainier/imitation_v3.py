@@ -22,8 +22,13 @@ import wandb
 
 from utils.utils import ensure_dir, set_seed, reduce_mean
 
+accelerator = accelerate.Accelerator()
+device = accelerator.device
 logging.basicConfig(level=logging.INFO)
 log = accelerate.logging.get_logger(__name__, log_level='INFO')
+def log_info(s):
+    if accelerator.is_main_process:
+        log.info(s)
 
 
 class QKADataset(Dataset):
@@ -91,8 +96,8 @@ class QKADataset(Dataset):
                     # for evaluation, only keep the first knowledge for sake of speed
                     if self.split == 'dev':
                         break
-            print(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
-        print(f'{self.split} set size = {len(ds)}')
+            log_info(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
+        log_info(f'{self.split} set size = {len(ds)}')
         return ds
 
     @staticmethod
@@ -172,8 +177,6 @@ class Trainer:
                  optimizer,
                  init_step,
                  eval_losses,
-                 device,
-                 accelerator,
                 ):
         self.args = args
         self.train_dataloader = train_dataloader
@@ -182,9 +185,7 @@ class Trainer:
         self.tokenizer = tokenizer
         self.model = model
         self.optimizer = optimizer
-        self.device = device
-        self.accelerator = accelerator
-        if not self.args.nosave and self.accelerator.is_main_process:
+        if not self.args.nolog and accelerator.is_main_process:
             wandb.init(project='rainier_stageI', name=args.run_name, config=args)
             wandb.define_metric('train/step')
             wandb.define_metric('eval/step')
@@ -234,7 +235,7 @@ class Trainer:
         self.save(step=step)
         self.eval(step=step)
 
-        accelerate.utils.wait_for_everyone()
+        accelerator.wait_for_everyone()
         self.model.train()
         self.optimizer.zero_grad()
         losses, qk_losses, qa_losses, qka_losses = [], [], [], []
@@ -255,7 +256,7 @@ class Trainer:
             qa_losses.append(qa_loss.detach().clone())
             qka_losses.append(qka_loss.detach().clone())
             loss = loss / self.args.accumulate_grad_batches
-            self.accelerator.backward(loss)
+            accelerator.backward(loss)
         self.optimizer.step()
 
         loss = torch.stack(losses).mean(dim=0, keepdim=True) # (1)
@@ -263,17 +264,17 @@ class Trainer:
         qa_loss = torch.stack(qa_losses).mean(dim=0, keepdim=True) # (1)
         qka_loss = torch.stack(qka_losses).mean(dim=0, keepdim=True) # (1)
 
-        losses = self.accelerator.gather(loss) # (num_gpus)
-        qk_losses = self.accelerator.gather(qk_loss) # (num_gpus)
-        qa_losses = self.accelerator.gather(qa_loss) # (num_gpus)
-        qka_losses = self.accelerator.gather(qka_loss) # (num_gpus)
+        losses = accelerator.gather(loss) # (num_gpus)
+        qk_losses = accelerator.gather(qk_loss) # (num_gpus)
+        qa_losses = accelerator.gather(qa_loss) # (num_gpus)
+        qka_losses = accelerator.gather(qka_loss) # (num_gpus)
 
         loss = losses.mean().item()
         qk_loss = qk_losses.mean().item()
         qa_loss = qa_losses.mean().item()
         qka_loss = qka_losses.mean().item()
 
-        if not self.args.nosave and self.accelerator.is_main_process:
+        if not self.args.nolog and accelerator.is_main_process:
             if step % self.args.log_interval == 0:
                 wandb.log({
                     'train/step': step,
@@ -300,7 +301,7 @@ class Trainer:
         flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * C, AL)
 
         # Preallocate tensor for all of the loss
-        all_losses = torch.zeros(flattened_questions_input_ids.size(0), device=self.device)
+        all_losses = torch.zeros(flattened_questions_input_ids.size(0), device=flattened_questions_input_ids.device)
 
         for i in range(0, flattened_questions_input_ids.size(0), self.args.batch_size):
             j = min(i + self.args.batch_size, flattened_questions_input_ids.size(0))
@@ -351,15 +352,15 @@ class Trainer:
             return
         if step in self.eval_losses:
             return
-        log.info(f'Evaluating [step {step}] ...')
+        log_info(f'Evaluating [step {step}] ...')
 
-        accelerate.utils.wait_for_everyone()
+        accelerator.wait_for_everyone()
         self.model.eval()
 
         with torch.no_grad():
             losses, qk_losses, qa_losses, qka_losses = [], [], [], []
             corrects, task_ixs = [], []
-            for i, batch in enumerate(tqdm(self.eval_dataloader)):
+            for i, batch in enumerate(tqdm(self.eval_dataloader) if accelerator.is_main_process else self.eval_dataloader):
                 if i == self.args.eval_loop_cap:
                     break
                 qk_loss = self.qk_loss(batch)
@@ -381,12 +382,12 @@ class Trainer:
         corrects = torch.cat(corrects, dim=0) # (N)
         task_ixs = torch.cat(task_ixs, dim=0) # (N)
 
-        losses = self.accelerator.gather(loss) # (num_gpus)
-        qk_losses = self.accelerator.gather(qk_loss) # (num_gpus)
-        qa_losses = self.accelerator.gather(qa_loss) # (num_gpus)
-        qka_losses = self.accelerator.gather(qka_loss) # (num_gpus)
-        corrects = self.accelerator.gather(corrects) # (num_gpus * N)
-        task_ixs = self.accelerator.gather(task_ixs) # (num_gpus * N)
+        losses = accelerator.gather(loss) # (num_gpus)
+        qk_losses = accelerator.gather(qk_loss) # (num_gpus)
+        qa_losses = accelerator.gather(qa_loss) # (num_gpus)
+        qka_losses = accelerator.gather(qka_loss) # (num_gpus)
+        corrects = accelerator.gather(corrects) # (num_gpus * N)
+        task_ixs = accelerator.gather(task_ixs) # (num_gpus * N)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
         corrects = corrects[:len(self.eval_dataloader.dataset)]
@@ -405,7 +406,7 @@ class Trainer:
         acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
 
-        if not self.args.nosave and self.accelerator.is_main_process:
+        if not self.args.nolog and accelerator.is_main_process:
             stats = {
                 'eval/step': step,
                 'eval/loss': loss,
@@ -419,6 +420,7 @@ class Trainer:
                 stats[f'eval/acc/{task}'] = acc
             wandb.log(stats)
 
+        if not self.args.nosave and accelerator.is_main_process:
             prev_best_step = None if len(self.eval_losses) == 0 else min(self.eval_losses, key=self.eval_losses.get)
             self.eval_losses[step] = qk_loss
             if prev_best_step is None or qk_loss < self.eval_losses[prev_best_step]:
@@ -428,7 +430,7 @@ class Trainer:
                     except:
                         log.warning(f'Cannot remove previous best ckpt!')
                 shutil.copy(f'{self.args.model_dir}/last.pth', f'{self.args.model_dir}/ckp_{step}.pth')
-                log.info(f'Best ckpt updated to [step {step}]')
+                log_info(f'Best ckpt updated to [step {step}]')
         else:
             self.eval_losses[step] = qk_loss
 
@@ -438,24 +440,22 @@ class Trainer:
         if step % self.args.save_interval != 0:
             return
         # this will overwrite an existing ckpt with the save filename!
-        accelerate.utils.wait_for_everyone()
-        if self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP:
+        accelerator.wait_for_everyone()
+        if accelerator.distributed_type == accelerate.utils.DistributedType.FSDP:
             save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, save_policy):
                 model_state_dict = self.model.state_dict()
         else:
-            model_state_dict = self.accelerator.unwrap_model(self.model).state_dict() # so that the parameters are synced across GPUs
+            model_state_dict = accelerator.unwrap_model(self.model).state_dict() # so that the parameters are synced across GPUs
         # TODO: Make optimizer state loading work
         # optimizer_state_dict = self.optimizer.state_dict()
-        if not self.accelerator.is_main_process:
-            return
-        self.accelerator.save({
+        accelerator.save({
             'model': model_state_dict,
             # 'optimizer': optimizer_state_dict,
             'step': step,
             'eval_losses': self.eval_losses,
         }, f'{self.args.model_dir}/last.pth')
-        log.info(f'[step {step}] model checkpoint saved')
+        log_info(f'[step {step}] model checkpoint saved')
 
 
 def get_args():
@@ -484,10 +484,10 @@ def get_args():
         '--save_interval', type=int, default=1000, help='step interval to save model checkpoints')
     parser.add_argument(
         '--eval_interval', type=int, default=1000, help='step interval to do evaluation')
-    parser.add_argument('--nosave', default=False, action='store_true')
     parser.add_argument('--run_name', type=str, default=None)
-    parser.add_argument(
-        '--eval_loop_cap', type=int, default=None, help='cap on number of eval loops')
+    parser.add_argument('--nosave', default=False, action='store_true')
+    parser.add_argument('--nolog', default=False, action='store_true')
+    parser.add_argument('--eval_loop_cap', type=int, default=None, help='cap on number of eval loops')
 
     args = parser.parse_args()
     return args
@@ -497,10 +497,6 @@ def main():
     args = get_args()
 
     set_seed()
-
-    # GPUs
-    accelerator = accelerate.Accelerator()
-    device = accelerator.device
 
     # Set up save directories
     if not args.nosave:
@@ -515,13 +511,13 @@ def main():
             for d in [args.save_dir, args.model_dir]:
                 ensure_dir(d)
     
-        log.info(f'Write to output directory: {args.save_dir}')
+        log_info(f'Write to output directory: {args.save_dir}')
         if accelerator.is_main_process:
             with open(os.path.join(args.save_dir, 'args.json'), 'w') as f:
                 json.dump(args.__dict__, f, indent=2)
 
     # Load data
-    log.info(f'Loading data ...')
+    log_info(f'Loading data ...')
     train_dataset = QKADataset('train', args.train_tasks)
     eval_dataset = QKADataset('dev', args.train_tasks)
     # train ds is shuffled in its constructor
@@ -529,7 +525,7 @@ def main():
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QKADataset.collate_fn)
 
     # Initialize models and optimizer
-    log.info(f'Initializing models ...')
+    log_info(f'Initializing models ...')
     global tokenizer
     tokenizer = transformers.T5Tokenizer.from_pretrained(args.model_type)
     tokenizer.max_question_len = args.max_question_len
@@ -562,13 +558,12 @@ def main():
         optimizer=optimizer,
         init_step=init_step,
         eval_losses=eval_losses,
-        device=device,
-        accelerator=accelerator,
     )
 
     # Train
-    pbar = tqdm(list(range(init_step, args.total_steps + 1)))
-    for step in pbar:
+    steps = list(range(init_step, args.total_steps + 1))
+    steps = tqdm(steps) if accelerator.is_main_process else steps
+    for step in steps:
         trainer.train(step)
 
 

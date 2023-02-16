@@ -19,7 +19,6 @@ class Reward:
                  kl_coef,
                  ensembling,
                  do_not_lowercase,
-                 device,
                 ):
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -27,7 +26,6 @@ class Reward:
         self.kl_coef = kl_coef
         self.ensembling = ensembling
         self.do_not_lowercase = do_not_lowercase
-        self.device = device
 
         self.gain, self.bias = None, None
 
@@ -78,7 +76,7 @@ class Reward:
         flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * C, AL)
 
         # Preallocate tensor for all of the loss
-        all_losses = torch.zeros(flattened_prompts_input_ids.size(0), device=self.device)
+        all_losses = torch.zeros(flattened_prompts_input_ids.size(0), device=flattened_prompts_input_ids.device)
 
         for i in range(0, flattened_prompts_input_ids.size(0), self.batch_size):
             j = min(i + self.batch_size, flattened_prompts_input_ids.size(0))

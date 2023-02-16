@@ -17,7 +17,7 @@ accelerate launch \
     --num_processes $num_processes \
     --main_process_ip $main_ip_address --main_process_port $available_port \
     --mixed_precision $2 \
-    --multi_gpu \
+    --use_fsdp --fsdp_auto_wrap_policy TRANSFORMER_BASED_WRAP --fsdp_backward_prefetch_policy BACKWARD_PRE --fsdp_offload_params false --fsdp_sharding_strategy 1 --fsdp_state_dict_type FULL_STATE_DICT --fsdp_transformer_layer_cls_to_wrap T5Block \
     main_v3.py \
     --mode train --use_model_ckpt_for_value --policy_value_sharing --batch_size 1 \
     --gain 3.575475037847048 --bias 0.032954977862281395 \
