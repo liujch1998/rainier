@@ -71,11 +71,11 @@ class Reward:
 
         # Compute number of choices for each question, and flatten prompts accordingly
         num_ans = (choicess_labels[:, :, 0] != 1).long().sum(dim=1) # (B)
-        flattened_prompts_input_ids = torch.repeat_interleave(prompts_input_ids, 8, dim=0) # (B * K, L)
-        flattened_prompts_attention_mask = torch.repeat_interleave(prompts_attention_mask, 8, dim=0) # (B * K, L)
-        flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * K, L)
-        flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * K, L)
-        flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * K, L)
+        flattened_prompts_input_ids = torch.repeat_interleave(prompts_input_ids, 8, dim=0) # (B * C, QL + KL)
+        flattened_prompts_attention_mask = torch.repeat_interleave(prompts_attention_mask, 8, dim=0) # (B * C, QL + KL)
+        flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * C, AL)
+        flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * C, AL)
+        flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * C, AL)
 
         # Preallocate tensor for all of the loss
         all_losses = torch.zeros(flattened_prompts_input_ids.size(0), device=self.device)

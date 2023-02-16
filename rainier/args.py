@@ -43,6 +43,8 @@ def get_args():
     parser.add_argument(
         '--load_from_ckpt', type=str, default=None, help='ckpt path to resume training or run eval')
     parser.add_argument(
+        '--load_from_stageI_ckpt', type=str, default=None, help='ckpt path to resume training or run eval')
+    parser.add_argument(
         '--eval_ckpt', type=str, default='../model/rainier-large.pth', help='rainier ckpt to run eval')
 
     # reward

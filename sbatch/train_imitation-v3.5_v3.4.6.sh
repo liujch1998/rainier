@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_imitation-v3.5_v3.4.6
 #SBATCH --partition=learnlab
-#SBATCH --nodes=1
+#SBATCH --nodes=2
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
 #SBATCH --gpus-per-node=8

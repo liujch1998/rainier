@@ -284,7 +284,6 @@ class PPOTrainer:
                  value_model: Value,
                  reward_model: Reward,
                  optimizer: torch.optim.Optimizer,
-                 scheduler: torch.optim.lr_scheduler.LambdaLR,
                  init_step: int,
                  eval_accs: Dict,
                  device,
@@ -298,7 +297,6 @@ class PPOTrainer:
         self.value_model = value_model
         self.reward_model = reward_model
         self.optimizer = optimizer
-        self.scheduler = scheduler
         self.device = device
         self.accelerator = accelerator
 
@@ -326,10 +324,10 @@ class PPOTrainer:
         old_values = results['knowledges_value']
         old_logprobs = results['knowledges_logprobs']
         rewards = results['rewards/penalized']
-        mask = results['knowledges_attention_mask']
+        mask = results['knowledges_attention_mask'] # (B, KL)
 
-        all_mask = self.accelerator.gather(mask)
-        weight = mask.sum(dim=1).item() / all_mask.sum(dim=1).float().mean().item()
+        all_mask = self.accelerator.gather(mask) # (num_gpus * B, KL)
+        weight = mask.sum(dim=1).float().mean().item() / all_mask.sum(dim=1).float().mean().item()
 
         with torch.no_grad():
             # if self.accelerator.is_main_process:
@@ -475,9 +473,6 @@ class PPOTrainer:
                           self.value_model.model.parameters()),
                     self.args.max_grad_norm)
             self.optimizer.step()
-
-        # Increment scheduler
-        self.scheduler.step()
 
         loss_total = results['loss/total'].unsqueeze(0) # (1)
         loss_policy = results['loss/policy'].unsqueeze(0) # (1)
@@ -769,6 +764,7 @@ class PPOTrainer:
             save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             with FSDP.state_dict_type(self.policy_model.model, StateDictType.FULL_STATE_DICT, save_policy):
                 policy_model_state_dict = self.policy_model.model.state_dict()
+            with FSDP.state_dict_type(self.policy_model.linear, StateDictType.FULL_STATE_DICT, save_policy):
                 policy_linear_state_dict = self.policy_model.linear.state_dict()
             if not self.args.policy_value_sharing:
                 with FSDP.state_dict_type(self.value_model.model, StateDictType.FULL_STATE_DICT, save_policy):
@@ -781,12 +777,10 @@ class PPOTrainer:
                 value_model_state_dict = self.accelerator.unwrap_model(self.value_model.model).state_dict()
         # TODO: Make optimizer state loading work
         # optimizer_state_dict = self.optimizer.state_dict()
-        # scheduler_state_dict = self.scheduler.state_dict()
         result = {
             'model': policy_model_state_dict,
             'linear': policy_linear_state_dict,
             # 'optimizer': optimizer_state_dict,
-            # 'scheduler': scheduler_state_dict,
             'step': step,
             'eval_accs': self.eval_accs,
         }
@@ -929,8 +923,6 @@ def main():
             parameters = chain(policy.model.parameters(), policy.linear.parameters(), value.model.parameters())
         optimizer = torch.optim.Adam(parameters, lr=args.lr, eps=1e-5)
         args.total_steps = ceil_div(args.total_episodes, args.batch_size * int(os.environ['SLURM_GPUS_ON_NODE']) * int(os.environ['SLURM_JOB_NUM_NODES']))
-        warmup_steps = np.ceil(args.num_warmup_step_ratio * args.total_steps)
-        scheduler = transformers.get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=args.total_steps)
         init_step = 0
         eval_accs = {}
 
@@ -938,18 +930,23 @@ def main():
         # if args.load_from_ckpt is not None:
         #     checkpoint = torch.load(args.load_from_ckpt)
         #     policy.model.load_state_dict(checkpoint['model'], strict=False)
-        #     if not args.policy_value_sharing:
+        #     if args.policy_value_sharing:
+        #         policy.linear.load_state_dict(checkpoint['linear'])
+        #     else:
         #         value.model.load_state_dict(checkpoint['value_model'], strict=False)
         #     optimizer.load_state_dict(checkpoint['optimizer'])
-        #     scheduler.load_state_dict(checkpoint['scheduler'])
         #     init_step = checkpoint['step']
         #     eval_accs = checkpoint['eval_accs']
         #     checkpoint.clear()
 
         #     # Reuse the reward normalization results
         #     reward.read_reward_norm(args.reward_dir)
+        if args.load_from_stageI_ckpt is not None:
+            checkpoint = torch.load(args.load_from_stageI_ckpt, map_location='cpu')
+            accelerator.unwrap_model(policy.model).load_state_dict(checkpoint['model'])
+            checkpoint.clear()
 
-        optimizer, scheduler = accelerator.prepare(optimizer, scheduler)
+        optimizer = accelerator.prepare(optimizer)
 
     elif args.mode == 'eval':
         ref_policy = None
@@ -963,7 +960,6 @@ def main():
             accelerator=accelerator,
         )
         optimizer = None
-        scheduler = None
         init_step = 0
         eval_accs = {}
 
@@ -971,8 +967,6 @@ def main():
         if args.load_from_ckpt is not None:
             checkpoint = torch.load(args.load_from_ckpt, map_location='cpu')
             policy.model.load_state_dict(checkpoint['model'], strict=False)
-            policy.linear.load_state_dict(checkpoint['linear'])
-            init_step = checkpoint['step']
             checkpoint.clear()
         elif args.eval_ckpt is not None:
             checkpoint = torch.load(args.eval_ckpt, map_location='cpu')
@@ -1005,7 +999,6 @@ def main():
         value_model=value,
         reward_model=reward,
         optimizer=optimizer,
-        scheduler=scheduler,
         init_step=init_step,
         eval_accs=eval_accs,
         device=device,

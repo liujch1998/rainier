@@ -11,6 +11,11 @@ from tqdm import tqdm
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    FullStateDictConfig,
+    StateDictType,
+)
 import transformers
 import accelerate
 import wandb
@@ -249,7 +254,7 @@ class Trainer:
             qk_losses.append(qk_loss.detach().clone())
             qa_losses.append(qa_loss.detach().clone())
             qka_losses.append(qka_loss.detach().clone())
-            loss /= self.args.accumulate_grad_batches
+            loss = loss / self.args.accumulate_grad_batches
             self.accelerator.backward(loss)
         self.optimizer.step()
 
@@ -280,19 +285,19 @@ class Trainer:
 
     # The code in this function is adapted from Reward.get_reward() in rainier/rainier/model/reward.py
     def acc(self, batch):
-        questions_input_ids = batch['question_input_ids'] # (B, L)
-        questions_attention_mask = batch['question_attention_mask'] # (B, L)
-        choicess_input_ids = batch['choices_input_ids'] # (B, K, L)
-        choicess_attention_mask = batch['choices_attention_mask'] # (B, K, L)
-        choicess_labels = batch['choices_labels'] # (B, K, L)
+        questions_input_ids = batch['question_input_ids'] # (B, QL)
+        questions_attention_mask = batch['question_attention_mask'] # (B, QL)
+        choicess_input_ids = batch['choices_input_ids'] # (B, C, AL)
+        choicess_attention_mask = batch['choices_attention_mask'] # (B, C, AL)
+        choicess_labels = batch['choices_labels'] # (B, C, AL)
         answer_ixs = batch['answer_ix'] # (B)
 
         # Compute number of choices for each question, and flatten prompts accordingly
-        flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, 8, dim=0) # (B * K, L)
-        flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, 8, dim=0) # (B * K, L)
-        flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * K, L)
-        flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * K, L)
-        flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * K, L)
+        flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, 8, dim=0) # (B * C, QL)
+        flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, 8, dim=0) # (B * C, QL)
+        flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * C, AL)
+        flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * C, AL)
+        flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * C, AL)
 
         # Preallocate tensor for all of the loss
         all_losses = torch.zeros(flattened_questions_input_ids.size(0), device=self.device)
@@ -316,7 +321,7 @@ class Trainer:
             losses = loss_fct(logits.view(-1, logits.size(-1)), batch_choices_labels.view(-1))
 
             # Take mean of loss
-            losses = losses.view(batch_choices_labels.size()) # (B, L)
+            losses = losses.view(batch_choices_labels.size()) # (B, AL)
             losses = reduce_mean(losses, batch_choices_attention_mask, axis=-1) # (B)
 
             # Update all loss
@@ -325,7 +330,7 @@ class Trainer:
         all_losses[flattened_choices_labels[:, 0] == 1] = 1e9 # If the first token is [EOS], then the choice is padding
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logitss = -all_losses.view(questions_input_ids.size(0), 8) # (B, K)
+        answer_logitss = -all_losses.view(questions_input_ids.size(0), 8) # (B, C)
         answer_probss = answer_logitss.softmax(axis=1)
 
         # Compute accuracy from argmax answer
@@ -340,7 +345,7 @@ class Trainer:
         }
 
     def eval(self, step):
-        if step == 0 and self.args.skip_init_eval:
+        if self.args.eval_loop_cap is not None and self.args.eval_loop_cap == 0:
             return
         if step % self.args.eval_interval != 0:
             return
@@ -355,6 +360,8 @@ class Trainer:
             losses, qk_losses, qa_losses, qka_losses = [], [], [], []
             corrects, task_ixs = [], []
             for i, batch in enumerate(tqdm(self.eval_dataloader)):
+                if i == self.args.eval_loop_cap:
+                    break
                 qk_loss = self.qk_loss(batch)
                 qa_loss = self.qa_loss(batch)
                 qka_loss = self.qka_loss(batch)
@@ -432,13 +439,19 @@ class Trainer:
             return
         # this will overwrite an existing ckpt with the save filename!
         accelerate.utils.wait_for_everyone()
-        model_state_dict = self.model.state_dict() # so that the parameters are synced across GPUs
-        optimizer_state_dict = self.optimizer.state_dict()
+        if self.accelerator.distributed_type == accelerate.utils.DistributedType.FSDP:
+            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, save_policy):
+                model_state_dict = self.model.state_dict()
+        else:
+            model_state_dict = self.accelerator.unwrap_model(self.model).state_dict() # so that the parameters are synced across GPUs
+        # TODO: Make optimizer state loading work
+        # optimizer_state_dict = self.optimizer.state_dict()
         if not self.accelerator.is_main_process:
             return
-        torch.save({
+        self.accelerator.save({
             'model': model_state_dict,
-            'optimizer': optimizer_state_dict,
+            # 'optimizer': optimizer_state_dict,
             'step': step,
             'eval_losses': self.eval_losses,
         }, f'{self.args.model_dir}/last.pth')
@@ -473,7 +486,8 @@ def get_args():
         '--eval_interval', type=int, default=1000, help='step interval to do evaluation')
     parser.add_argument('--nosave', default=False, action='store_true')
     parser.add_argument('--run_name', type=str, default=None)
-    parser.add_argument('--skip_init_eval', default=False, action='store_true')
+    parser.add_argument(
+        '--eval_loop_cap', type=int, default=None, help='cap on number of eval loops')
 
     args = parser.parse_args()
     return args
@@ -528,13 +542,13 @@ def main():
     eval_losses = {}
 
     # Load from checkpoint if continue training
-    if args.load_from_ckpt is not None:
-        checkpoint = torch.load(args.load_from_ckpt, map_location=torch.device('cpu'))
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        init_step = checkpoint['step']
-        eval_losses = checkpoint['eval_losses']
-        checkpoint.clear()
+    # if args.load_from_ckpt is not None:
+    #     checkpoint = torch.load(args.load_from_ckpt, map_location='cpu')
+    #     model.load_state_dict(checkpoint['model'])
+    #     optimizer.load_state_dict(checkpoint['optimizer'])
+    #     init_step = checkpoint['step']
+    #     eval_losses = checkpoint['eval_losses']
+    #     checkpoint.clear()
 
     optimizer, train_dataloader, eval_dataloader = accelerator.prepare(optimizer, train_dataloader, eval_dataloader)
 
