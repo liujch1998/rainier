@@ -55,22 +55,25 @@ class Reward:
                    override_bias = None,
                    skip_reward = False,
                   ):
-        questions_len = questions_attention_mask.long().sum(dim=1)
-        prompts_input_ids = F.pad(questions_input_ids, (0, self.tokenizer.max_knowledge_len + 2), value=self.tokenizer.pad_token_id)
-        prompts_attention_mask = F.pad(questions_attention_mask, (0, self.tokenizer.max_knowledge_len + 2), value=0)
+        questions_len = questions_attention_mask.sum(dim=1)
         if knowledges_input_ids is not None and knowledges_attention_mask is not None:
+            prompts_input_ids = F.pad(questions_input_ids, (0, self.tokenizer.max_knowledge_len + 2), value=self.tokenizer.pad_token_id)
+            prompts_attention_mask = F.pad(questions_attention_mask, (0, self.tokenizer.max_knowledge_len + 2), value=0)
             B = questions_input_ids.size(0)
-            knowledges_len = knowledges_attention_mask.long().sum(dim=1)
+            knowledges_len = knowledges_attention_mask.sum(dim=1)
             for b in range(B):
                 prompts_input_ids[b, questions_len[b]-1:questions_len[b]+2] = torch.tensor([3, 2, 29], dtype=torch.long, device=questions_input_ids.device)
                 prompts_input_ids[b, questions_len[b]+2:questions_len[b]+2+knowledges_len[b]] = knowledges_input_ids[b, :knowledges_len[b]]
                 prompts_attention_mask[b, questions_len[b]-1:questions_len[b]+2+knowledges_len[b]] = 1
+        else:
+            prompts_input_ids = questions_input_ids
+            prompts_attention_mask = questions_attention_mask
         prompts_text = self.tokenizer.batch_decode(prompts_input_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
 
         # Compute number of choices for each question, and flatten prompts accordingly
         num_ans = (choicess_labels[:, :, 0] != 1).long().sum(dim=1) # (B)
-        flattened_prompts_input_ids = torch.repeat_interleave(prompts_input_ids, 8, dim=0) # (B * C, QL + KL)
-        flattened_prompts_attention_mask = torch.repeat_interleave(prompts_attention_mask, 8, dim=0) # (B * C, QL + KL)
+        flattened_prompts_input_ids = torch.repeat_interleave(prompts_input_ids, choicess_input_ids.size(1), dim=0) # (B * C, QL + KL)
+        flattened_prompts_attention_mask = torch.repeat_interleave(prompts_attention_mask, choicess_input_ids.size(1), dim=0) # (B * C, QL + KL)
         flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * C, AL)
         flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * C, AL)
         flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * C, AL)
@@ -97,7 +100,7 @@ class Reward:
             losses = loss_fct(logits.view(-1, logits.size(-1)), batch_choices_labels.view(-1))
 
             # Take mean of loss
-            losses = losses.view(batch_choices_labels.size()) # (B, L)
+            losses = losses.view(batch_choices_labels.size()) # (B, AL)
             losses = reduce_mean(losses, batch_choices_attention_mask, axis=-1) # (B)
 
             # Update all loss
@@ -106,7 +109,7 @@ class Reward:
         all_losses[flattened_choices_labels[:, 0] == 1] = 1e9 # If the first token is [EOS], then the choice is padding
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logitss = -all_losses.view(questions_input_ids.size(0), 8) # (B, C)
+        answer_logitss = -all_losses.view(questions_input_ids.size(0), -1) # (B, C)
         answer_probss = answer_logitss.softmax(axis=1)
 
         # Compute accuracy from argmax answer
@@ -257,9 +260,9 @@ class Reward:
         bias = self.bias if override_bias is None else override_bias
         rewards_normalized = gain * rewards + bias
 
-        return {
-            'corrects': corrects, # (B)
+        result = {
             'preds': preds, # (B)
+            'corrects': corrects, # (B)
             'answer_logitss': answer_logitss, # (B, C)
             'answer_probss': answer_probss, # (B, C)
             'prompts_text': prompts_text,
@@ -268,6 +271,16 @@ class Reward:
             'rewards/raw': rewards, # (B)
             'rewards/normalized': rewards_normalized, # (B)
         }
+        if knowledges_input_ids is not None:
+            preds_knowless = knowless_results['preds']
+            corrects_knowless = knowless_results['corrects']
+            rectifieds = corrects.long() - corrects_knowless.long()
+            result.update({
+                'preds_knowless': preds_knowless, # (B)
+                'corrects_knowless': corrects_knowless, # (B)
+                'rectifieds': rectifieds, # (B)
+            })
+        return result
 
     def kl_penalize_reward(self, results):
         logprobs = results['knowledges_logprobs']
@@ -328,11 +341,12 @@ class Reward:
             answer_probsss.append(results['answer_probss'])
 
         answer_logitsss = torch.stack(answer_logitsss) # (1+K, B, C)
-        answer_probsss = torch.stack(answer_probsss)
+        answer_probsss = torch.stack(answer_probsss) # (1+K, B, C)
 
         if self.ensembling == 'max':
             answer_probss = answer_probsss.max(dim=0).values
             preds = answer_probss.argmax(dim=1)
+            selected_knowledge_ixs = answer_probsss.max(dim=-1).values.argmax(dim=0) - 1
         elif self.ensembling == 'moe':
             answer_probss = answer_probsss.mean(dim=0)
             preds = answer_probss.argmax(dim=1)
@@ -346,11 +360,20 @@ class Reward:
         # Compute accuracy from argmax answer
         corrects = (preds == answer_ixs)
 
+        preds_knowless = knowless_results['preds']
+        corrects_knowless = knowless_results['corrects']
+        rectifieds = corrects.long() - corrects_knowless.long()
+
         return {
-            'corrects': corrects,
-            'preds': preds,
+            'preds': preds, # (B)
+            'corrects': corrects, # (B)
+            'preds_knowless': preds_knowless, # (B)
+            'corrects_knowless': corrects_knowless, # (B)
+            'rectifieds': rectifieds, # (B)
             'answer_logitsss': answer_logitsss,
             'answer_probsss': answer_probsss,
+            'answer_probss': answer_probss,
+            'selected_knowledge_ixs': selected_knowledge_ixs, # (B) # TODO: Make this compatible with other ensembling methods
         }
 
     def write_reward_norm(self, reward_dir):

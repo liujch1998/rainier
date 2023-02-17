@@ -40,8 +40,6 @@ class Policy:
                top_p: float = None,
                temperature: float = None,
               ) -> Dict[str, Union[torch.Tensor, List[str]]]:
-        questions_text = self.tokenizer.batch_decode(questions_input_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         if not self.policy_reward_sharing:
             knowledges_input_ids = unwrapped_model.generate(
@@ -82,9 +80,6 @@ class Policy:
         lowercased_knowledges_attention_mask = lowercased_knowledges_tok.attention_mask
 
         return {
-            'questions_text': questions_text,
-            'questions_input_ids': questions_input_ids, # (B, QL)
-            'questions_attention_mask': questions_attention_mask, # (B, QL)
             'knowledges_text': knowledges_text,
             'knowledges_input_ids': knowledges_input_ids, # (B, KL)
             'knowledges_attention_mask': knowledges_attention_mask, # (B, KL)

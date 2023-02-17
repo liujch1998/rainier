@@ -233,7 +233,7 @@ class Trainer:
 
     def train(self, step):
         self.save(step=step)
-        self.eval(step=step)
+        self.valid(step=step)
 
         accelerator.wait_for_everyone()
         self.model.train()
@@ -345,7 +345,7 @@ class Trainer:
             'answer_probss': answer_probss,
         }
 
-    def eval(self, step):
+    def valid(self, step):
         if self.args.eval_loop_cap is not None and self.args.eval_loop_cap == 0:
             return
         if step % self.args.eval_interval != 0:

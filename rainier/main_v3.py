@@ -1,5 +1,6 @@
 import argparse
 from collections import defaultdict
+import copy
 from itertools import chain
 import json
 import logging
@@ -126,6 +127,7 @@ class QADataset(Dataset):
                         instances.append({
                             'task': task,
                             'task_ix': task_ix,
+                            'split': self.split,
                             'question': q,
                             'choices': choices,
                             'answer': a,
@@ -149,6 +151,7 @@ class QADataset(Dataset):
                         instances.append({
                             'task': task,
                             'task_ix': task_ix,
+                            'split': self.split,
                             'question': q,
                             'choices': choices,
                             'answer': a,
@@ -171,7 +174,8 @@ class QADataset(Dataset):
         questions_input_ids = questions_tok.input_ids
         questions_attention_mask = questions_tok.attention_mask
 
-        choicess = [item['choices'] + [''] * (8 - len(item['choices'])) for item in batch]
+        CAP = 8 if batch[0]['split'] == 'train' else 16
+        choicess = [item['choices'] + [''] * (CAP - len(item['choices'])) for item in batch]
         choicess_tok = [self.tokenizer.batch_encode_plus(
             choices,
             return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_answer_len)
@@ -219,12 +223,15 @@ class QADataset(Dataset):
         result = {
             'task_ixs': task_ixs,
             'answer_ixs': answer_ixs,
+            'questions_text': questions,
             'questions_input_ids': questions_input_ids,
             'questions_attention_mask': questions_attention_mask,
+            'choicess_text': choicess,
             'choicess_input_ids': choicess_input_ids,
             'choicess_attention_mask': choicess_attention_mask,
             'choicess_labels': choicess_labels,
             'answers_labels': answers_labels,
+            'lowercased_questions_text': lowercased_questions,
             'lowercased_questions_input_ids': lowercased_questions_input_ids,
             'lowercased_questions_attention_mask': lowercased_questions_attention_mask,
             'lowercased_choicess_input_ids': lowercased_choicess_input_ids,
@@ -265,9 +272,11 @@ class QADataset(Dataset):
             knowledgess_with_prefix_labels[knowledgess_with_prefix_attention_mask == 0] = -100
 
             result.update({
+                'knowledgess_text': knowledgess,
                 'knowledgess_input_ids': knowledgess_input_ids,
                 'knowledegss_attention_mask': knowledgess_attention_mask,
                 'knowledgess_labels': knowledgess_labels,
+                'lowercased_knowledgess_text': lowercased_knowledgess,
                 'lowercased_knowledgess_input_ids': lowercased_knowledgess_input_ids,
                 'lowercased_knowledgess_attention_mask': lowercased_knowledgess_attention_mask,
                 'lowercased_knowledgess_labels': lowercased_knowledgess_labels,
@@ -411,13 +420,16 @@ class PPOTrainer:
             self.train_sampler = iter(self.train_dataloader)
             batch = next(self.train_sampler)
 
+        results = copy.deepcopy(batch)
+
         # Rollout from current policy
         with torch.no_grad():
-            results = self.policy_model.sample(
-                questions_input_ids=batch['questions_input_ids'],
-                questions_attention_mask=batch['questions_attention_mask'],
+            rollouts = self.policy_model.sample(
+                questions_input_ids=results['questions_input_ids'],
+                questions_attention_mask=results['questions_attention_mask'],
                 temperature=self.args.temperature,
             )
+            results.update(rollouts)
 
         forward_inputs = {
             'questions_input_ids': results['questions_input_ids'],
@@ -446,12 +458,12 @@ class PPOTrainer:
         # Get reward
         with torch.no_grad():
             reward_results = self.reward_model.get_reward(
-                questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
-                questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
-                choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
-                choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
-                choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
-                answer_ixs=batch['answer_ixs'],
+                questions_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                questions_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+                answer_ixs=results['answer_ixs'],
                 knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                 knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
             )
@@ -533,33 +545,41 @@ class PPOTrainer:
 
         with torch.no_grad():
             corrects, task_ixs = [], []
-            # results_table = wandb.Table(columns=['step', 'id', 'task', 'question', 'knowledge', 'pred', 'answer_ix', 'correct'])
+            results_table = wandb.Table(columns=['step', 'id', 'task', 'question', 'knowledge', 'answer_ix', 'pred', 'correct', 'pred_knowless', 'correct_knowless', 'rectified'])
             for i, batch in enumerate(tqdm(self.eval_dataloader) if accelerator.is_main_process else self.eval_dataloader):
                 if self.args.eval_loop_cap is not None and i == self.args.eval_loop_cap:
                     break
 
-                results = self.policy_model.sample(
-                    questions_input_ids=batch['questions_input_ids'],
-                    questions_attention_mask=batch['questions_attention_mask'],
+                results = copy.deepcopy(batch)
+
+                rollouts = self.policy_model.sample(
+                    questions_input_ids=results['questions_input_ids'],
+                    questions_attention_mask=results['questions_attention_mask'],
                     sample=False,
                 )
+                results.update(rollouts)
 
-                results = self.reward_model.get_reward(
-                    questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
-                    questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
-                    choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
-                    choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
-                    choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
-                    answer_ixs=batch['answer_ixs'],
+                reward_results = self.reward_model.get_reward(
+                    questions_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                    questions_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                    choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                    choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                    choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+                    answer_ixs=results['answer_ixs'],
                     knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                     knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
                     override_bias=0,
                     override_gain=1,
                 )
+                results.update(reward_results)
 
                 corrects.append(results['corrects'])
-                task_ixs.append(batch['task_ixs'])
-                # results_table.add_data(step, i, batch['task'][0], batch['question'][0], knowledges[0], results['preds'][0], batch['answer_ix'][0], results['corrects'][0])
+                task_ixs.append(results['task_ixs'])
+
+                if accelerator.is_main_process:
+                    results_table.add_data(step, i, self.eval_dataloader.dataset.tasks[results['task_ixs'][0]],
+                                           results['questions_text'][0], results['knowledges_text'][0], results['answer_ixs'][0].item(),
+                                           results['preds'][0].item(), results['corrects'][0].item(), results['preds_knowless'][0].item(), results['corrects_knowless'][0].item(), results['rectifieds'][0].item())
 
         corrects = torch.cat(corrects, dim=0) # (N)
         task_ixs = torch.cat(task_ixs, dim=0) # (N)
@@ -588,7 +608,7 @@ class PPOTrainer:
         if not self.args.nolog and accelerator.is_main_process:
             stats = {
                 'eval/step': step,
-                # 'eval/results_table': results_table,
+                'eval/results_table': results_table,
                 'eval/acc_weighted': acc_weighted,
                 'eval/acc_unweighted': acc_unweighted,
             }
@@ -611,67 +631,92 @@ class PPOTrainer:
             self.eval_accs[step] = acc_unweighted
 
     def eval(self, step): # step=-1 for baseline
+        if self.args.eval_loop_cap is not None and self.args.eval_loop_cap == 0:
+            return
         log_info(f'Evaluating [step {step}] ...')
 
         accelerator.wait_for_everyone()
 
         with torch.no_grad():
             corrects, task_ixs = [], []
+            results_table = wandb.Table(columns=['step', 'id', 'task', 'question', 'knowledge', 'answer_ix', 'pred', 'correct', 'pred_knowless', 'correct_knowless', 'rectified'])
             knowledge_outputs = []
             inference_outputs = []
             for i, batch in enumerate(tqdm(self.eval_dataloader) if accelerator.is_main_process else self.eval_dataloader):
-                knowledgess_input_ids, knowledgess_attention_mask = [], [] # [K * (B, KL)]
+                if self.args.eval_loop_cap is not None and i == self.args.eval_loop_cap:
+                    break
+
+                results = copy.deepcopy(batch)
+
+                knowledgess_text, knowledgess_input_ids, knowledgess_attention_mask = [], [], [] # [K * (B, KL)]
                 if step != -1: # If not baseline, generate knowledge
-                    if 'knowledges' not in batch:
+                    if 'knowledgess_input_ids' not in results:
                         for j in range(self.args.num_samples):
-                            results = self.policy_model.sample(
-                                questions_input_ids=batch['questions_input_ids'],
-                                questions_attention_mask=batch['questions_attention_mask'],
+                            rollouts = self.policy_model.sample(
+                                questions_input_ids=results['questions_input_ids'],
+                                questions_attention_mask=results['questions_attention_mask'],
                                 top_p=self.args.top_p,
                             )
-                            knowledgess_input_ids.append(results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'])
-                            knowledgess_attention_mask.append(results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'])
+                            knowledgess_text.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_text'])
+                            knowledgess_input_ids.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'])
+                            knowledgess_attention_mask.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'])
                         knowledgess_input_ids = torch.stack(knowledgess_input_ids, dim=0) # (K, B, KL)
                         knowledgess_attention_mask = torch.stack(knowledgess_attention_mask, dim=0) # (K, B, KL)
                     else:
-                        knowledgess_input_ids = batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_input_ids']
-                        knowledgess_attention_mask = batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_attention_mask']
+                        knowledgess_text = results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_text']
+                        knowledgess_input_ids = results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_input_ids']
+                        knowledgess_attention_mask = results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_attention_mask']
 
-                results = self.reward_model.get_reward_ensemble(
-                    questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
-                    questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
-                    choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
-                    choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
-                    choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
-                    answer_ixs=batch['answer_ixs'],
+                reward_results = self.reward_model.get_reward_ensemble(
+                    questions_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                    questions_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                    choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                    choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                    choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+                    answer_ixs=results['answer_ixs'],
                     knowledgess_input_ids=knowledgess_input_ids,
                     knowledgess_attention_mask=knowledgess_attention_mask,
                     override_bias=0,
                     override_gain=1,
                 )
+                results.update(reward_results)
 
                 corrects.append(results['corrects'])
-                task_ixs.append(batch['task_ix'])
+                task_ixs.append(results['task_ixs'])
 
-                # TODO: fix this!
-                # knowledgess = [list(x) for x in zip(*knowledgess)] if len(knowledgess) > 0 else [[] for _ in batch['question']] # transpose the knowledge matrix
-                # for i, (task, question, choices, answer_ix, knowledges) in enumerate(zip(batch['task'], batch['question'], batch['choices'], batch['answer_ix'], knowledgess)):
-                #     item = {
-                #         'task': task,
-                #         'split': self.args.eval_split,
-                #         'query': question,
-                #         'cands': choices,
-                #         'answer': choices[answer_ix],
-                #         'knowledges': knowledges,
-                #     }
-                #     knowledge_outputs.append(copy.deepcopy(item))
-                #     item.update({
-                #         'scores_': results['answer_logitss'][:, i, :len(choices)].tolist(),
-                #         'probs_': results['answer_probss'][:, i, :len(choices)].tolist(),
-                #         'preds': choices[results['preds'][i].item()],
-                #         'ok': int(results['corrects'][i]),
-                #     })
-                #     inference_outputs.append(item)
+                if accelerator.is_main_process:
+                    selected_knowledge_ix = results['selected_knowledge_ixs'][0].item()
+                    selected_knowledge = knowledgess_text[selected_knowledge_ix][0] if selected_knowledge_ix != -1 else ''
+                    results_table.add_data(step, i, self.eval_dataloader.dataset.tasks[results['task_ixs'][0].item()],
+                                           results['questions_text'][0], selected_knowledge, results['answer_ixs'][0].item(),
+                                           results['preds'][0].item(), results['corrects'][0].item(), results['preds_knowless'][0].item(), results['corrects_knowless'][0].item(), results['rectifieds'][0].item())
+
+                # TODO: Gather these results across all processes
+                knowledgess_text_transposed = [list(x) for x in zip(*knowledgess_text)] if len(knowledgess_text) > 0 else [[] for _ in range(len(results['questions_text']))]
+                for i, (task_ix, question, choices, answer_ix, knowledges) in enumerate(zip(results['task_ixs'], results['questions_text'], results['choicess_text'], results['answer_ixs'], knowledgess_text_transposed)):
+                    choices = [choice for choice in choices if choice != ''] # remove padding
+                    knowledges = [knowledge for knowledge in knowledges if knowledge != ''] # remove padding
+                    item = {
+                        'task': self.eval_dataloader.dataset.tasks[task_ix.item()],
+                        'split': self.args.eval_split,
+                        'query': question,
+                        'cands': choices,
+                        'answer_ix': answer_ix.item(),
+                        'answer': choices[answer_ix.item()],
+                        'knowledges': knowledges,
+                    }
+                    knowledge_outputs.append(copy.deepcopy(item))
+                    item.update({
+                        'scores_': results['answer_logitsss'][:1+len(knowledges), i, :len(choices)].tolist(),
+                        'probs_': results['answer_probsss'][:1+len(knowledges), i, :len(choices)].tolist(),
+                        'probs': results['answer_probss'][i, :len(choices)].tolist(),
+                        'pred': results['preds'][i].item(),
+                        'ok': int(results['corrects'][i].item()),
+                        'pred_knowless': results['preds_knowless'][i].item(),
+                        'ok_knowless': int(results['corrects_knowless'][i].item()),
+                        'rectified': results['rectifieds'][i].item(),
+                    })
+                    inference_outputs.append(copy.deepcopy(item))
 
         corrects = torch.cat(corrects, dim=0) # (N)
         task_ixs = torch.cat(task_ixs, dim=0) # (N)
@@ -700,6 +745,7 @@ class PPOTrainer:
         if not self.args.nolog and accelerator.is_main_process:
             stats = {
                 'eval/step': step,
+                'eval/results_table': results_table,
                 'eval/acc_weighted': acc_weighted,
                 'eval/acc_unweighted': acc_unweighted,
             }
@@ -726,23 +772,26 @@ class PPOTrainer:
             for i, batch in enumerate(tqdm(self.train_dataloader) if accelerator.is_main_process else self.train_dataloader):
                 if self.args.eval_loop_cap is not None and i == self.args.eval_loop_cap:
                     break
-                results = self.policy_model.sample(
-                    questions_input_ids=batch['questions_input_ids'],
-                    questions_attention_mask=batch['questions_attention_mask'],
+                results = copy.deepcopy(batch)
+                rollouts = self.policy_model.sample(
+                    questions_input_ids=results['questions_input_ids'],
+                    questions_attention_mask=results['questions_attention_mask'],
                     temperature=self.args.temperature,
                 )
-                results = self.reward_model.get_reward(
-                    questions_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
-                    questions_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
-                    choicess_input_ids=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
-                    choicess_attention_mask=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
-                    choicess_labels=batch[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
-                    answer_ixs=batch['answer_ixs'],
+                results.update(rollouts)
+                reward_results = self.reward_model.get_reward(
+                    questions_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+                    questions_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+                    choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+                    choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+                    choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+                    answer_ixs=results['answer_ixs'],
                     knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                     knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
                     override_bias=0,
                     override_gain=1,
                 )
+                results.update(reward_results)
                 rewards.append(results['rewards/raw'])
 
         rewards = torch.cat(rewards, dim=0) # (N)
@@ -817,7 +866,7 @@ def main():
         elif args.mode == 'eval':
             if args.load_from_ckpt is not None:
                 args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
-                args.save_dir = args.save_dir.replace('runs/', 'eval/')
+                args.save_dir = args.save_dir.replace('runs', 'eval')
                 ckp = args.load_from_ckpt.split('ckp_')[-1].strip('.pth')
                 args.save_dir += f'_ckp-{ckp}'
             elif args.eval_ckpt is not None:
@@ -935,6 +984,7 @@ def main():
         if args.load_from_stageI_ckpt is not None:
             checkpoint = torch.load(args.load_from_stageI_ckpt, map_location='cpu')
             accelerator.unwrap_model(policy.model).load_state_dict(checkpoint['model'])
+            accelerator.unwrap_model(ref_policy.model).load_state_dict(checkpoint['model'])
             checkpoint.clear()
 
         optimizer = accelerator.prepare(optimizer)
