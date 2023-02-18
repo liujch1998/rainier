@@ -23,4 +23,5 @@ accelerate launch \
     --policy_reward_sharing --do_not_lowercase \
     --load_from_stageI_ckpt ../runs_stageI/20230216-105655.3858812.train_imitation-v3.5_v3.4.6/model/ckp_50000.pth \
     --gain 55.210418417687954 --bias 0.01657477586327642 \
-    --run_name $1 --eval_baseline --nosave
+    --qa_coef 1.0 --qka_coef 1.0 \
+    --run_name $1

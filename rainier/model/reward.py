@@ -48,6 +48,7 @@ class Reward:
                    choicess_input_ids: torch.tensor, # (B, C, AL)
                    choicess_attention_mask: torch.tensor, # (B, C, AL)
                    choicess_labels: torch.tensor, # (B, C, AL)
+                   answers_labels: torch.tensor, # (B, AL)
                    answer_ixs: torch.tensor, # (B)
                    knowledges_input_ids: Optional[torch.tensor] = None, # (B, KL)
                    knowledges_attention_mask: Optional[torch.tensor] = None, # (B, KL)
@@ -78,8 +79,8 @@ class Reward:
         flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * C, AL)
         flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * C, AL)
 
-        # Preallocate tensor for all of the loss
-        all_losses = torch.zeros(flattened_prompts_input_ids.size(0), device=flattened_prompts_input_ids.device)
+        all_losses = []
+        assert flattened_choices_input_ids.size(0) % self.batch_size == 0
 
         for i in range(0, flattened_prompts_input_ids.size(0), self.batch_size):
             j = min(i + self.batch_size, flattened_prompts_input_ids.size(0))
@@ -89,11 +90,12 @@ class Reward:
             batch_choices_attention_mask = flattened_choices_attention_mask[i:j]
             batch_choices_labels = flattened_choices_labels[i:j]
 
-            logits = self.model(
-                input_ids=batch_prompts_input_ids,
-                attention_mask=batch_prompts_attention_mask,
-                labels=batch_choices_input_ids,
-            ).logits # (B, L, V)
+            with torch.no_grad():
+                logits = self.model(
+                    input_ids=batch_prompts_input_ids,
+                    attention_mask=batch_prompts_attention_mask,
+                    labels=batch_choices_input_ids,
+                ).logits # (B, L, V)
 
             # Loss will be exactly 0 for ignored, pad idx tokens
             loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
@@ -104,17 +106,26 @@ class Reward:
             losses = reduce_mean(losses, batch_choices_attention_mask, axis=-1) # (B)
 
             # Update all loss
-            all_losses[i:j] = losses
+            all_losses.append(losses)
 
+        all_losses = torch.cat(all_losses, dim=0) # (B * C)
         all_losses[flattened_choices_labels[:, 0] == 1] = 1e9 # If the first token is [EOS], then the choice is padding
+        all_losses = all_losses.view(questions_input_ids.size(0), -1) # (B, C)
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logitss = -all_losses.view(questions_input_ids.size(0), -1) # (B, C)
+        answer_logitss = -all_losses # (B, C)
         answer_probss = answer_logitss.softmax(axis=1)
 
         # Compute accuracy from argmax answer
         preds = answer_probss.argmax(axis=1)
         corrects = (preds == answer_ixs)
+
+        # Compute QA loss
+        qa_loss = self.model(
+            input_ids=prompts_input_ids,
+            attention_mask=prompts_attention_mask,
+            labels=answers_labels,
+        ).loss
 
         if skip_reward:
             return {
@@ -125,6 +136,7 @@ class Reward:
                 'prompts_text': prompts_text,
                 'prompts_input_ids': prompts_input_ids,
                 'prompts_attention_mask': prompts_attention_mask,
+                'loss/qa' if knowledges_input_ids is None else 'loss/qka': qa_loss,
             }
 
         # Probabilities of the gt answer
@@ -142,6 +154,7 @@ class Reward:
                     choicess_input_ids,
                     choicess_attention_mask,
                     choicess_labels,
+                    answers_labels,
                     answer_ixs,
                     knowledges_input_ids=None,
                     knowledges_attention_mask=None,
@@ -149,9 +162,25 @@ class Reward:
                     override_bias=override_bias,
                 )
                 rewards -= knowless_results['rewards/raw']
+                knowless_qa_loss = knowless_results['loss/qa']
 
         elif self.reward_shape == 1: # r = p(a*|q,k), same as using no --prob_diff before
             rewards = gt_answer_probs.squeeze(-1)
+            if knowledges_input_ids is not None:
+                knowless_results = self.get_reward(
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answers_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                knowless_qa_loss = knowless_results['loss/qa']
 
         elif self.reward_shape == 2: # r = s(a*|q,k) - s(a*|q), same as using --prob_diff and --prob_nonorm before
             rewards = gt_answer_logits.squeeze(-1)
@@ -163,6 +192,7 @@ class Reward:
                     choicess_input_ids,
                     choicess_attention_mask,
                     choicess_labels,
+                    answers_labels,
                     answer_ixs,
                     knowledges_input_ids=None,
                     knowledges_attention_mask=None,
@@ -170,9 +200,25 @@ class Reward:
                     override_bias=override_bias,
                 )
                 rewards -= knowless_results['rewards/raw']
+                knowless_qa_loss = knowless_results['loss/qa']
 
         elif self.reward_shape == 3: # r = s(a*|q,k), same as using --prob_nonorm but no --prob_diff before
             rewards = gt_answer_logits.squeeze(-1)
+            if knowledges_input_ids is not None:
+                knowless_results = self.get_reward(
+                    questions_input_ids,
+                    questions_attention_mask,
+                    choicess_input_ids,
+                    choicess_attention_mask,
+                    choicess_labels,
+                    answers_labels,
+                    answer_ixs,
+                    knowledges_input_ids=None,
+                    knowledges_attention_mask=None,
+                    override_gain=override_gain,
+                    override_bias=override_bias,
+                )
+                knowless_qa_loss = knowless_results['loss/qa']
 
         elif self.reward_shape == 4: # r = { tanh[s(a*|q,k) - max s(a'|q,k)] - tanh[s(a*|q) - max s(a'|q)] } / 2
             distractor_idxs = answer_logitss.argsort(dim=1, descending=True)
@@ -189,6 +235,7 @@ class Reward:
                     choicess_input_ids,
                     choicess_attention_mask,
                     choicess_labels,
+                    answers_labels,
                     answer_ixs,
                     knowledges_input_ids=None,
                     knowledges_attention_mask=None,
@@ -196,6 +243,7 @@ class Reward:
                     override_bias=override_bias,
                 )
                 rewards -= knowless_results['rewards/raw']
+                knowless_qa_loss = knowless_results['loss/qa']
 
         elif self.reward_shape == 5: # r = { sgn[s(a*|q,k) - max s(a'|q,k)] - sgn[s(a*|q) - max s(a'|q)] } / 2
             distractor_idxs = answer_logitss.argsort(dim=1, descending=True)
@@ -212,6 +260,7 @@ class Reward:
                     choicess_input_ids,
                     choicess_attention_mask,
                     choicess_labels,
+                    answers_labels,
                     answer_ixs,
                     knowledges_input_ids=None,
                     knowledges_attention_mask=None,
@@ -219,6 +268,7 @@ class Reward:
                     override_bias=override_bias,
                 )
                 rewards -= knowless_results['rewards/raw']
+                knowless_qa_loss = knowless_results['loss/qa']
 
         elif self.reward_shape == 6: # r = { tanh[p(a*|q,k) - 1/|A|] - tanh[p(a*|q) - 1/|A|] } / 2
             rewards = (0.5 * torch.tanh(gt_answer_probs - 1.0 / torch.tensor(num_ans, device=gt_answer_probs.device).unsqueeze(-1))).squeeze(-1)
@@ -230,6 +280,7 @@ class Reward:
                     choicess_input_ids,
                     choicess_attention_mask,
                     choicess_labels,
+                    answers_labels,
                     answer_ixs,
                     knowledges_input_ids=None,
                     knowledges_attention_mask=None,
@@ -237,6 +288,7 @@ class Reward:
                     override_bias=override_bias,
                 )
                 rewards -= knowless_results['rewards/raw']
+                knowless_qa_loss = knowless_results['loss/qa']
 
         elif self.reward_shape == 7: # r = { sign[p(a*|q,k) - 1/|A|] - sign[p(a*|q) - 1/|A|] } / 2
             rewards = (0.5 * torch.sign(gt_answer_probs - 1.0 / torch.tensor(num_ans, device=gt_answer_probs.device).unsqueeze(-1))).squeeze(-1)
@@ -248,6 +300,7 @@ class Reward:
                     choicess_input_ids,
                     choicess_attention_mask,
                     choicess_labels,
+                    answers_labels,
                     answer_ixs,
                     knowledges_input_ids=None,
                     knowledges_attention_mask=None,
@@ -255,6 +308,7 @@ class Reward:
                     override_bias=override_bias,
                 )
                 rewards -= knowless_results['rewards/raw']
+                knowless_qa_loss = knowless_results['loss/qa']
 
         gain = self.gain if override_gain is None else override_gain
         bias = self.bias if override_bias is None else override_bias
@@ -268,8 +322,8 @@ class Reward:
             'prompts_text': prompts_text,
             'prompts_input_ids': prompts_input_ids,
             'prompts_attention_mask': prompts_attention_mask,
-            'rewards/raw': rewards, # (B)
-            'rewards/normalized': rewards_normalized, # (B)
+            'rewards/raw': rewards.detach(), # (B)
+            'rewards/normalized': rewards_normalized.detach(), # (B)
         }
         if knowledges_input_ids is not None:
             preds_knowless = knowless_results['preds']
@@ -280,6 +334,15 @@ class Reward:
                 'corrects_knowless': corrects_knowless, # (B)
                 'rectifieds': rectifieds, # (B)
             })
+        if knowledges_input_ids is not None:
+            result.update({
+                'loss/qa': qa_loss,
+                'loss/qka': knowless_qa_loss,
+            })
+        else:
+            result.update({
+                'loss/qa': qa_loss,
+            })
         return result
 
     def kl_penalize_reward(self, results):
@@ -288,13 +351,9 @@ class Reward:
         mask = results['knowledges_attention_mask']
         normalized_rewards = results['rewards/normalized']
 
+        flattened_rewards = torch.zeros(logprobs.size(), device=normalized_rewards.device, dtype=normalized_rewards.dtype).scatter_(dim=1, index=mask.sum(dim=1, keepdim=True)-1, src=normalized_rewards.unsqueeze(-1))
         kl = logprobs - ref_logprobs
         kl_penalty = self.kl_coef * kl
-        RL = logprobs.size(1)
-        flattened_rewards = torch.tensor([
-            [0.] * (l-1) + [r] + [0.] * (RL-l)
-            for r, l in zip(normalized_rewards, torch.sum(mask, dim=1).tolist())
-        ], device=logprobs.device) # (B, KL)
         penalized_rewards = flattened_rewards - kl_penalty
         # TODO: This is slightly different from the paper
 
@@ -308,6 +367,7 @@ class Reward:
                             choicess_input_ids: torch.tensor, # (B, C, AL)
                             choicess_attention_mask: torch.tensor, # (B, C, AL)
                             choicess_labels: torch.tensor, # (B, C, AL)
+                            answers_labels: torch.tensor, # (B, AL)
                             answer_ixs: torch.tensor, # (B)
                             knowledgess_input_ids: torch.tensor, # (K, B, KL)
                             knowledgess_attention_mask: torch.tensor, # (K, B, KL)
@@ -320,7 +380,7 @@ class Reward:
         knowless_results = self.get_reward(
             questions_input_ids, questions_attention_mask,
             choicess_input_ids, choicess_attention_mask, choicess_labels,
-            answer_ixs,
+            answers_labels, answer_ixs,
             None, None,
             override_gain, override_bias,
             skip_reward=True,
@@ -332,7 +392,7 @@ class Reward:
             results = self.get_reward(
                 questions_input_ids, questions_attention_mask,
                 choicess_input_ids, choicess_attention_mask, choicess_labels,
-                answer_ixs,
+                answers_labels, answer_ixs,
                 knowlegdes_input_ids, knowledges_attention_mask,
                 override_gain, override_bias,
                 skip_reward=True,

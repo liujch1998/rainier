@@ -340,12 +340,8 @@ class PPOTrainer:
         weight = mask.sum(dim=1).float().mean().item() / all_mask.sum(dim=1).float().mean().item()
 
         with torch.no_grad():
-            # if accelerator.is_main_process:
-            #     log.info(f'original rewards: {rewards}')
             if self.args.whiten_rewards:
                 whitened_rewards = whiten(rewards, mask, shift_mean=False, accelerator=accelerator)
-            # if accelerator.is_main_process:
-            #     log.info(f'whitened rewards: {whitened_rewards}')
 
             lastgaelam = 0
             advantages_reversed = []
@@ -360,11 +356,7 @@ class PPOTrainer:
             advantages = F.pad(advantages, (0, whitened_rewards.size(1) - gen_length), value=0.0)
             returns = advantages + old_values
 
-            # if accelerator.is_main_process:
-            #     log.info(f'original advantages: {advantages}')
             whitened_advantages = whiten(advantages, mask, accelerator=accelerator).detach()
-            # if accelerator.is_main_process:
-            #     log.info(f'whitened advantages: {whitened_advantages}')
 
         forward_inputs = {
             'questions_input_ids': results['questions_input_ids'],
@@ -381,13 +373,6 @@ class PPOTrainer:
         pg_losses2 = -whitened_advantages * torch.clamp(ratio, min=1.0 - self.args.cliprange, max=1.0 + self.args.cliprange)
         pg_loss = reduce_mean(torch.max(pg_losses1, pg_losses2), mask)
         pg_loss = pg_loss * weight
-        # if pg_loss < -4.0:
-        #     print(f'process_index: {accelerator.process_index}')
-        #     print(f'pg_loss: {pg_loss}')
-        #     print(f'advantages: {whitened_advantages}')
-        #     print(f'ratio: {ratio}')
-        #     print(f'mask: {mask}')
-        # pg_clipfrac = reduce_mean(torch.gt(pg_losses2, pg_losses).float(), mask)
 
         if self.args.policy_value_sharing:
             new_values = policy_forward['knowledges_value']
@@ -401,7 +386,6 @@ class PPOTrainer:
         vf_losses2 = torch.square(new_values_clipped - returns)
         vf_loss = .5 * reduce_mean(torch.max(vf_losses1, vf_losses2), mask)
         vf_loss = vf_loss * weight
-        # vf_clipfrac = reduce_mean(torch.gt(vf_losses2, vf_losses1).float(), mask)
 
         loss = self.args.pg_coef * pg_loss + self.args.vf_coef * vf_loss
 
@@ -456,25 +440,26 @@ class PPOTrainer:
             results['knowledges_ref_logprobs'] = ref_policy_forward['knowledges_logprobs']
 
         # Get reward
+        reward_results = self.reward_model.get_reward(
+            questions_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
+            questions_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
+            choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
+            choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
+            choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+            answers_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'answers_labels'],
+            answer_ixs=results['answer_ixs'],
+            knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
+            knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
+        )
+        results.update(reward_results)
         with torch.no_grad():
-            reward_results = self.reward_model.get_reward(
-                questions_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_input_ids'],
-                questions_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'questions_attention_mask'],
-                choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
-                choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
-                choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
-                answer_ixs=results['answer_ixs'],
-                knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
-                knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
-            )
-            results.update(reward_results)
             self.reward_model.kl_penalize_reward(results)
 
-        # if accelerator.is_main_process:
-        #     for k, v in results.items():
-        #         log.info(f'{k}: {v}')
-
         # Train
+        self.optimizer.zero_grad()
+        loss = self.args.qa_coef * results['loss/qa'] + self.args.qka_coef * results['loss/qka']
+        accelerator.backward(loss)
+        self.optimizer.step()
         # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
         for ppo_epoch_idx in range(self.args.noptepochs):
             self.optimizer.zero_grad()
@@ -490,6 +475,8 @@ class PPOTrainer:
         loss_total = results['loss/total'].unsqueeze(0) # (1)
         loss_policy = results['loss/policy'].unsqueeze(0) # (1)
         loss_value = results['loss/value'].unsqueeze(0) # (1)
+        loss_qa = results['loss/qa'].unsqueeze(0) # (1)
+        loss_qka = results['loss/qka'].unsqueeze(0) # (1)
         reward_penalized = torch.mean(reduce_sum(results['rewards/penalized'], results['knowledges_attention_mask'], axis=1)).unsqueeze(0) # (1)
         reward_kl = torch.mean(reduce_sum(results['rewards/kl'], results['knowledges_attention_mask'], axis=1)).unsqueeze(0) # (1)
         reward_normalized = results['rewards/normalized'].mean(dim=0, keepdim=True) # (1)
@@ -498,9 +485,9 @@ class PPOTrainer:
         corrects = accelerator.gather(results['corrects']) # (num_gpus * B)
         losses_total = accelerator.gather(loss_total) # (num_gpus)
         losses_policy = accelerator.gather(loss_policy) # (num_gpus)
-        # if accelerator.is_main_process:
-        #     log.info(f'losses_policy: {losses_policy}')
         losses_value = accelerator.gather(loss_value) # (num_gpus)
+        losses_qa = accelerator.gather(loss_qa) # (num_gpus)
+        losses_qka = accelerator.gather(loss_qka) # (num_gpus)
         rewards_penalized = accelerator.gather(reward_penalized) # (num_gpus)
         rewards_kl = accelerator.gather(reward_kl) # (num_gpus)
         rewards_normalized = accelerator.gather(reward_normalized) # (num_gpus)
@@ -509,9 +496,9 @@ class PPOTrainer:
         acc = corrects.float().mean().item()
         loss_total = losses_total.mean().item()
         loss_policy = losses_policy.mean().item()
-        # if accelerator.is_main_process:
-        #     log.info(f'loss_policy: {loss_policy}')
         loss_value = losses_value.mean().item()
+        loss_qa = losses_qa.mean().item()
+        loss_qka = losses_qka.mean().item()
         reward_penalized = rewards_penalized.mean().item()
         reward_kl = rewards_kl.mean().item()
         reward_normalized = rewards_normalized.mean().item()
@@ -526,6 +513,8 @@ class PPOTrainer:
                     'train/loss/total': loss_total,
                     'train/loss/policy': loss_policy,
                     'train/loss/value': loss_value,
+                    'train/loss/qa': loss_qa,
+                    'train/loss/qka': loss_qka,
                     'train/reward/penalized': reward_penalized,
                     'train/reward/KL': reward_kl,
                     'train/reward/normalized': reward_normalized,
@@ -565,6 +554,7 @@ class PPOTrainer:
                     choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
                     choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
                     choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+                    answers_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'answers_labels'],
                     answer_ixs=results['answer_ixs'],
                     knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                     knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],
@@ -673,6 +663,7 @@ class PPOTrainer:
                     choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
                     choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
                     choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+                    answers_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'answers_labels'],
                     answer_ixs=results['answer_ixs'],
                     knowledgess_input_ids=knowledgess_input_ids,
                     knowledgess_attention_mask=knowledgess_attention_mask,
@@ -785,6 +776,7 @@ class PPOTrainer:
                     choicess_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_input_ids'],
                     choicess_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_attention_mask'],
                     choicess_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'choicess_labels'],
+                    answers_labels=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'answers_labels'],
                     answer_ixs=results['answer_ixs'],
                     knowledges_input_ids=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'],
                     knowledges_attention_mask=results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'],

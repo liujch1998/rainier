@@ -247,7 +247,7 @@ class Trainer:
                 batch = next(self.train_sampler)
             qk_loss = self.qk_loss(batch)
             qa_loss = self.qa_loss(batch)
-            qka_loss = torch.tensor(0.0, device=qk_loss.device)
+            qka_loss = torch.tensor(0.0, device=qa_loss.device, dtype=qa_loss.dtype)
             if self.args.qka_loss:
                 qka_loss = self.qka_loss(batch)
             loss = qk_loss + qa_loss + qka_loss
@@ -294,14 +294,14 @@ class Trainer:
         answer_ixs = batch['answer_ix'] # (B)
 
         # Compute number of choices for each question, and flatten prompts accordingly
-        flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, 8, dim=0) # (B * C, QL)
-        flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, 8, dim=0) # (B * C, QL)
+        flattened_questions_input_ids = torch.repeat_interleave(questions_input_ids, choicess_input_ids.size(1), dim=0) # (B * C, QL)
+        flattened_questions_attention_mask = torch.repeat_interleave(questions_attention_mask, choicess_input_ids.size(1), dim=0) # (B * C, QL)
         flattened_choices_input_ids = choicess_input_ids.flatten(0, 1) # (B * C, AL)
         flattened_choices_attention_mask = choicess_attention_mask.flatten(0, 1) # (B * C, AL)
         flattened_choices_labels = choicess_labels.flatten(0, 1) # (B * C, AL)
 
-        # Preallocate tensor for all of the loss
-        all_losses = torch.zeros(flattened_questions_input_ids.size(0), device=flattened_questions_input_ids.device)
+        all_losses = []
+        assert flattened_choices_input_ids.size(0) % self.args.batch_size == 0        
 
         for i in range(0, flattened_questions_input_ids.size(0), self.args.batch_size):
             j = min(i + self.args.batch_size, flattened_questions_input_ids.size(0))
@@ -326,12 +326,14 @@ class Trainer:
             losses = reduce_mean(losses, batch_choices_attention_mask, axis=-1) # (B)
 
             # Update all loss
-            all_losses[i:j] = losses
+            all_losses.append(losses)
 
+        all_losses = torch.cat(all_losses, dim=0) # (B * C)
         all_losses[flattened_choices_labels[:, 0] == 1] = 1e9 # If the first token is [EOS], then the choice is padding
+        all_losses.view(questions_input_ids.size(0), -1) # (B, C)
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
-        answer_logitss = -all_losses.view(questions_input_ids.size(0), 8) # (B, C)
+        answer_logitss = -all_losses # (B, C)
         answer_probss = answer_logitss.softmax(axis=1)
 
         # Compute accuracy from argmax answer
@@ -365,7 +367,9 @@ class Trainer:
                     break
                 qk_loss = self.qk_loss(batch)
                 qa_loss = self.qa_loss(batch)
-                qka_loss = self.qka_loss(batch)
+                qka_loss = torch.tensor(0.0, device=qa_loss.device, dtype=qa_loss.dtype)
+                if self.args.qka_loss:
+                    qka_loss = self.qka_loss(batch)
                 loss = qk_loss + qa_loss + qka_loss
                 results = self.acc(batch)
                 losses.append(loss.detach().clone())

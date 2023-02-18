@@ -78,6 +78,10 @@ def get_args():
         '--clip_grad', action='store_true', default=False, help='whether to clip gradient')
     parser.add_argument(
         '--max-grad-norm', type=float, default=0.5, help='maximum norm of gradients ')
+    parser.add_argument(
+        '--qa_coef', type=float, default=0.0, help='coefficient for QA loss')
+    parser.add_argument(
+        '--qka_coef', type=float, default=0.0, help='coefficient for QKA loss')
 
     # train
     parser.add_argument(
