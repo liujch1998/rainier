@@ -1,0 +1,26 @@
+#!/bin/bash
+
+cd /private/home/ljc/rainier/rainier
+module load anaconda3
+source "/public/apps/anaconda3/2022.05/etc/profile.d/conda.sh"
+conda activate rainier2
+export LD_LIBRARY_PATH=~/.conda/envs/rainier2/lib:$LD_LIBRARY_PATH
+
+num_processes=$(($SLURM_GPUS_ON_NODE * $SLURM_JOB_NUM_NODES))
+main_node_name=$(scontrol show hostnames $SLURM_JOB_NODELIST | sort | head -n 1)
+main_ip_address=$(python -c 'import sys; import socket; ip=socket.gethostbyname(sys.argv[1]); print(ip)' ${main_node_name})
+# available_port=$(python -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()')
+available_port=29510
+
+accelerate launch \
+    --num_machines $SLURM_JOB_NUM_NODES --machine_rank $SLURM_NODEID --same_network \
+    --num_processes $num_processes \
+    --main_process_ip $main_ip_address --main_process_port $available_port \
+    --mixed_precision $2 \
+    --multi_gpu \
+    main_v3.py \
+    --model_type allenai/unifiedqa-t5-$3 --batch_size $4 \
+    --mode eval --eval_baseline \
+    --policy_reward_sharing --do_not_lowercase \
+    --eval_tasks obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg \
+    --load_from_ckpt ../runs_stageI/20230216-105655.3858812.train_imitation-v3.5_v3.4.6/model/ckp_50000.pth
