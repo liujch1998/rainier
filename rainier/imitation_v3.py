@@ -32,8 +32,9 @@ def log_info(s):
 
 
 class QKADataset(Dataset):
-    def __init__(self, split, tasks):
+    def __init__(self, args, split, tasks):
         super().__init__()
+        self.args = args
         self.split = split
         self.tasks = tasks.split(',')
 
@@ -74,6 +75,8 @@ class QKADataset(Dataset):
             path = f'../data/knowledge/knowledge_gkp_gpt3curie.{self.split}.{task}.json'
             with open(path) as f:
                 js = json.load(f)
+            if self.split == 'train' and self.args.half_half:
+                js = js[:len(js) // 2]
             skipped = 0
             for item in js:
                 try:
@@ -177,6 +180,7 @@ class Trainer:
                  optimizer,
                  init_step,
                  eval_losses,
+                 eval_accs,
                 ):
         self.args = args
         self.train_dataloader = train_dataloader
@@ -196,6 +200,7 @@ class Trainer:
             next(self.train_sampler)
 
         self.eval_losses = eval_losses
+        self.eval_accs = eval_accs
 
     def qk_loss(self, batch):
         logits = self.model(
@@ -330,7 +335,7 @@ class Trainer:
 
         all_losses = torch.cat(all_losses, dim=0) # (B * C)
         all_losses[flattened_choices_labels[:, 0] == 1] = 1e9 # If the first token is [EOS], then the choice is padding
-        all_losses.view(questions_input_ids.size(0), -1) # (B, C)
+        all_losses = all_losses.view(questions_input_ids.size(0), -1) # (B, C)
 
         # Now, convert back to tensor of the correct shape - # of questions X max # of answers
         answer_logitss = -all_losses # (B, C)
@@ -352,7 +357,7 @@ class Trainer:
             return
         if step % self.args.eval_interval != 0:
             return
-        if step in self.eval_losses:
+        if step in self.eval_losses and step in self.eval_accs:
             return
         log_info(f'Evaluating [step {step}] ...')
 
@@ -426,8 +431,8 @@ class Trainer:
 
         if not self.args.nosave and accelerator.is_main_process:
             prev_best_step = None if len(self.eval_losses) == 0 else min(self.eval_losses, key=self.eval_losses.get)
-            self.eval_losses[step] = qk_loss
-            if prev_best_step is None or qk_loss < self.eval_losses[prev_best_step]:
+            self.eval_losses[step] = loss
+            if prev_best_step is None or loss < self.eval_losses[prev_best_step]:
                 if prev_best_step is not None:
                     try:
                         os.remove(f'{self.args.model_dir}/ckp_{prev_best_step}.pth')
@@ -436,7 +441,21 @@ class Trainer:
                 shutil.copy(f'{self.args.model_dir}/last.pth', f'{self.args.model_dir}/ckp_{step}.pth')
                 log_info(f'Best ckpt updated to [step {step}]')
         else:
-            self.eval_losses[step] = qk_loss
+            self.eval_losses[step] = loss
+
+        if not self.args.nosave and accelerator.is_main_process:
+            prev_best_step = None if len(self.eval_accs) == 0 else max(self.eval_accs, key=self.eval_accs.get)
+            self.eval_accs[step] = acc_unweighted
+            if prev_best_step is None or acc_unweighted > self.eval_accs[prev_best_step]:
+                if prev_best_step is not None:
+                    try:
+                        os.remove(f'{self.args.model_dir}/ckp_{prev_best_step}.pth')
+                    except:
+                        log.warning(f'Cannot remove previous best ckpt!')
+                shutil.copy(f'{self.args.model_dir}/last.pth', f'{self.args.model_dir}/ckp_{step}.pth')
+                log_info(f'Best ckpt updated to [step {step}]')
+        else:
+            self.eval_accs[step] = acc_unweighted
 
     def save(self, step):
         if self.args.nosave:
@@ -451,13 +470,10 @@ class Trainer:
                 model_state_dict = self.model.state_dict()
         else:
             model_state_dict = accelerator.unwrap_model(self.model).state_dict() # so that the parameters are synced across GPUs
-        # TODO: Make optimizer state loading work
-        # optimizer_state_dict = self.optimizer.state_dict()
         accelerator.save({
             'model': model_state_dict,
-            # 'optimizer': optimizer_state_dict,
             'step': step,
-            'eval_losses': self.eval_losses,
+            'eval_accs': self.eval_accs,
         }, f'{self.args.model_dir}/last.pth')
         log_info(f'[step {step}] model checkpoint saved')
 
@@ -480,6 +496,7 @@ def get_args():
     parser.add_argument('--accumulate_grad_batches', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--qka_loss', default=False, action='store_true')
+    parser.add_argument('--half_half', default=False, action='store_true')
 
     # other
     parser.add_argument(
@@ -522,11 +539,12 @@ def main():
 
     # Load data
     log_info(f'Loading data ...')
-    train_dataset = QKADataset('train', args.train_tasks)
-    eval_dataset = QKADataset('dev', args.train_tasks)
+    train_dataset = QKADataset(args, 'train', args.train_tasks)
+    eval_dataset = QKADataset(args, 'dev', args.train_tasks)
     # train ds is shuffled in its constructor
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=QKADataset.collate_fn)
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=QKADataset.collate_fn)
+    train_dataloader, eval_dataloader = accelerator.prepare(train_dataloader, eval_dataloader)
 
     # Initialize models and optimizer
     log_info(f'Initializing models ...')
@@ -538,19 +556,10 @@ def main():
     model = transformers.T5ForConditionalGeneration.from_pretrained(args.model_type)
     model = accelerator.prepare(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = accelerator.prepare(optimizer)
     init_step = 0
     eval_losses = {}
-
-    # Load from checkpoint if continue training
-    # if args.load_from_ckpt is not None:
-    #     checkpoint = torch.load(args.load_from_ckpt, map_location='cpu')
-    #     model.load_state_dict(checkpoint['model'])
-    #     optimizer.load_state_dict(checkpoint['optimizer'])
-    #     init_step = checkpoint['step']
-    #     eval_losses = checkpoint['eval_losses']
-    #     checkpoint.clear()
-
-    optimizer, train_dataloader, eval_dataloader = accelerator.prepare(optimizer, train_dataloader, eval_dataloader)
+    eval_accs = {}
 
     # Set up trainer
     trainer = Trainer(
@@ -562,6 +571,7 @@ def main():
         optimizer=optimizer,
         init_step=init_step,
         eval_losses=eval_losses,
+        eval_accs=eval_accs,
     )
 
     # Train

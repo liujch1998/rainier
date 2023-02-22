@@ -82,6 +82,8 @@ def get_args():
         '--qa_coef', type=float, default=0.0, help='coefficient for QA loss')
     parser.add_argument(
         '--qka_coef', type=float, default=0.0, help='coefficient for QKA loss')
+    parser.add_argument(
+        '--half_half', action='store_true', default=False)
 
     # train
     parser.add_argument(

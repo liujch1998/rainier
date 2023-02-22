@@ -9,7 +9,7 @@ import os
 import random
 import shutil
 from tqdm import tqdm
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -67,13 +67,14 @@ datapath_by_task_and_split = {
 
 # This does not lowercase the data, by default
 class QADataset(Dataset):
-    def __init__(self, args, split, tasks, data_path, tokenizer):
+    def __init__(self, args, split, tasks, data_path, tokenizer, subsplit=None):
         super().__init__()
         self.args = args
         self.split = split
         self.tasks = tasks.split(',')
         self.data_path = data_path
         self.tokenizer = tokenizer
+        self.subsplit = subsplit
 
         self.instances = self.load_datasets()
 
@@ -114,7 +115,15 @@ class QADataset(Dataset):
                 datapath_by_split = datapath_by_task_and_split[task]
                 datapath = datapath_by_split[self.split if self.split in datapath_by_split else 'default']
                 with open(self.data_path.replace('{datapath}', datapath).replace('{split}', self.split)) as f:
-                    for line in f:
+                    lines = f.readlines()
+                    if self.subsplit is not None:
+                        if self.subsplit == 'qa':
+                            lines = lines[:len(lines) // 2]
+                        elif self.subsplit == 'rl':
+                            lines = lines[len(lines) // 2:]
+                        else:
+                            raise
+                    for line in lines:
                         try:
                             q, a = line.strip('\n').split('\t')
                             q = q.strip(' ')
@@ -139,6 +148,13 @@ class QADataset(Dataset):
                 skipped = 0
                 with open(self.data_path.replace('{task}', task).replace('{split}', self.split)) as f:
                     js = json.load(f)
+                    if self.subsplit is not None:
+                        if self.subsplit == 'qa':
+                            js = js[:len(js) // 2]
+                        elif self.subsplit == 'rl':
+                            js = js[len(js) // 2:]
+                        else:
+                            raise
                     for item in js:
                         try:
                             q, a = item['query'], item['answer']
@@ -261,15 +277,15 @@ class QADataset(Dataset):
             lowercased_knowledgess_labels = lowercased_knowledgess_input_ids.clone()
             lowercased_knowledgess_labels[lowercased_knowledgess_attention_mask == 0] = -100
 
-            knowledgess_with_prefix = [[f'Knowledge: {k}' for k in ks] for ks in knowledgess]
-            knowledgess_with_prefix_tok = [self.tokenizer.batch_encode_plus(
-                knowledges_with_prefix,
+            prefixed_knowledgess = [[f'Knowledge: {k}' for k in ks] for ks in knowledgess]
+            prefixed_knowledgess_tok = [self.tokenizer.batch_encode_plus(
+                prefixed_knowledges,
                 return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_knowledge_len)
-                for knowledges_with_prefix in knowledgess_with_prefix]
-            knowledgess_with_prefix_input_ids = torch.stack([knowledges_with_prefix_tok.input_ids for knowledges_with_prefix_tok in knowledgess_with_prefix_tok], dim=0)
-            knowledgess_with_prefix_attention_mask = torch.stack([knowledges_with_prefix_tok.attention_mask for knowledges_with_prefix_tok in knowledgess_with_prefix_tok], dim=0)
-            knowledgess_with_prefix_labels = knowledgess_with_prefix_input_ids.clone()
-            knowledgess_with_prefix_labels[knowledgess_with_prefix_attention_mask == 0] = -100
+                for prefixed_knowledges in prefixed_knowledgess]
+            prefixed_knowledgess_input_ids = torch.stack([prefixed_knowledges_tok.input_ids for prefixed_knowledges_tok in prefixed_knowledgess_tok], dim=0)
+            prefixed_knowledgess_attention_mask = torch.stack([prefixed_knowledges_tok.attention_mask for prefixed_knowledges_tok in prefixed_knowledgess_tok], dim=0)
+            prefixed_knowledgess_labels = prefixed_knowledgess_input_ids.clone()
+            prefixed_knowledgess_labels[prefixed_knowledgess_attention_mask == 0] = -100
 
             result.update({
                 'knowledgess_text': knowledgess,
@@ -280,9 +296,9 @@ class QADataset(Dataset):
                 'lowercased_knowledgess_input_ids': lowercased_knowledgess_input_ids,
                 'lowercased_knowledgess_attention_mask': lowercased_knowledgess_attention_mask,
                 'lowercased_knowledgess_labels': lowercased_knowledgess_labels,
-                'knowledgess_with_prefix_input_ids': knowledgess_with_prefix_input_ids,
-                'knowledegss_with_prefix_attention_mask': knowledgess_with_prefix_attention_mask,
-                'knowledgess_with_prefix_labels': knowledgess_with_prefix_labels,
+                'prefixed_knowledgess_input_ids': prefixed_knowledgess_input_ids,
+                'prefixed_knowledgess_attention_mask': prefixed_knowledgess_attention_mask,
+                'prefixed_knowledgess_labels': prefixed_knowledgess_labels,
             })
         
         return result
@@ -291,7 +307,9 @@ class QADataset(Dataset):
 class PPOTrainer:
     def __init__(self,
                  args: argparse.Namespace,
-                 train_dataloader: DataLoader,
+                 train_dataloader: Optional[DataLoader],
+                 train_dataloader_qa: Optional[DataLoader],
+                 train_dataloader_rl: Optional[DataLoader],
                  eval_dataloader: DataLoader,
                  ref_policy_model: Policy,
                  policy_model: Policy,
@@ -303,6 +321,8 @@ class PPOTrainer:
                 ):
         self.args = args
         self.train_dataloader = train_dataloader
+        self.train_dataloader_qa = train_dataloader_qa
+        self.train_dataloader_rl = train_dataloader_rl
         self.eval_dataloader = eval_dataloader
         self.ref_policy_model = ref_policy_model
         self.policy_model = policy_model
@@ -318,9 +338,17 @@ class PPOTrainer:
                 wandb.define_metric('train/*', step_metric='train/step')
                 wandb.define_metric('eval/*', step_metric='eval/step', summary='max')
 
-            self.train_sampler = iter(self.train_dataloader)
-            for _ in range(init_step % len(self.train_dataloader)):
-                next(self.train_sampler)
+            if not self.args.half_half:
+                self.train_sampler = iter(self.train_dataloader)
+                for _ in range(init_step % len(self.train_dataloader)):
+                    next(self.train_sampler)
+            else:
+                self.train_sampler_qa = iter(self.train_dataloader_qa)
+                for _ in range(int(np.ceil(init_step / 2)) % len(self.train_dataloader_qa)):
+                    next(self.train_sampler_qa)
+                self.train_sampler_rl = iter(self.train_dataloader_rl)
+                for _ in range(int(np.floor(init_step / 2)) % len(self.train_dataloader_rl)):
+                    next(self.train_sampler_rl)
 
             self.eval_accs = eval_accs
 
@@ -363,6 +391,8 @@ class PPOTrainer:
             'questions_attention_mask': results['questions_attention_mask'],
             'knowledges_input_ids': results['knowledges_input_ids'],
             'knowledges_attention_mask': results['knowledges_attention_mask'],
+            'prefixed_knowledges_input_ids': results['prefixed_knowledges_input_ids'],
+            'prefixed_knowledges_attention_mask': results['prefixed_knowledges_attention_mask'],
         }
 
         policy_forward = self.policy_model.forward_pass(**forward_inputs)
@@ -398,11 +428,25 @@ class PPOTrainer:
         self.valid(step=step)
 
         accelerator.wait_for_everyone()
-        try:
-            batch = next(self.train_sampler)
-        except StopIteration:
-            self.train_sampler = iter(self.train_dataloader)
-            batch = next(self.train_sampler)
+        if not self.args.half_half:
+            try:
+                batch = next(self.train_sampler)
+            except StopIteration:
+                self.train_sampler = iter(self.train_dataloader)
+                batch = next(self.train_sampler)
+        else:
+            if step % 2 == 0:
+                try:
+                    batch = next(self.train_sampler_qa)
+                except StopIteration:
+                    self.train_sampler_qa = iter(self.train_dataloader_qa)
+                    batch = next(self.train_sampler_qa)
+            else:
+                try:
+                    batch = next(self.train_sampler_rl)
+                except StopIteration:
+                    self.train_sampler_rl = iter(self.train_dataloader_rl)
+                    batch = next(self.train_sampler_rl)
 
         results = copy.deepcopy(batch)
 
@@ -420,6 +464,8 @@ class PPOTrainer:
             'questions_attention_mask': results['questions_attention_mask'],
             'knowledges_input_ids': results['knowledges_input_ids'],
             'knowledges_attention_mask': results['knowledges_attention_mask'],
+            'prefixed_knowledges_input_ids': results['prefixed_knowledges_input_ids'],
+            'prefixed_knowledges_attention_mask': results['prefixed_knowledges_attention_mask'],
         }
 
         with torch.no_grad():
@@ -456,70 +502,77 @@ class PPOTrainer:
             self.reward_model.kl_penalize_reward(results)
 
         # Train
-        self.optimizer.zero_grad()
-        loss = self.args.qa_coef * results['loss/qa'] + self.args.qka_coef * results['loss/qka']
-        accelerator.backward(loss)
-        self.optimizer.step()
-        # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
-        for ppo_epoch_idx in range(self.args.noptepochs):
+        if not self.args.half_half or (self.args.half_half and step % 2 == 0):
             self.optimizer.zero_grad()
-            self.loss(results)
-            accelerator.backward(results['loss/total'])
-            if self.args.clip_grad:
-                torch.nn.utils.clip_grad_norm_(
-                    chain(self.policy_model.model.parameters(),
-                          self.value_model.model.parameters()),
-                    self.args.max_grad_norm)
+            loss = self.args.qa_coef * results['loss/qa'] + self.args.qka_coef * results['loss/qka']
+            accelerator.backward(loss)
             self.optimizer.step()
+        if not self.args.half_half or (self.args.half_half and step % 2 == 1):
+            # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
+            for ppo_epoch_idx in range(self.args.noptepochs):
+                self.optimizer.zero_grad()
+                self.loss(results)
+                accelerator.backward(results['loss/total'])
+                if self.args.clip_grad:
+                    torch.nn.utils.clip_grad_norm_(
+                        chain(self.policy_model.model.parameters(),
+                              self.value_model.model.parameters()),
+                        self.args.max_grad_norm)
+                self.optimizer.step()
 
-        loss_total = results['loss/total'].unsqueeze(0) # (1)
-        loss_policy = results['loss/policy'].unsqueeze(0) # (1)
-        loss_value = results['loss/value'].unsqueeze(0) # (1)
-        loss_qa = results['loss/qa'].unsqueeze(0) # (1)
-        loss_qka = results['loss/qka'].unsqueeze(0) # (1)
-        reward_penalized = torch.mean(reduce_sum(results['rewards/penalized'], results['knowledges_attention_mask'], axis=1)).unsqueeze(0) # (1)
-        reward_kl = torch.mean(reduce_sum(results['rewards/kl'], results['knowledges_attention_mask'], axis=1)).unsqueeze(0) # (1)
-        reward_normalized = results['rewards/normalized'].mean(dim=0, keepdim=True) # (1)
-        reward_raw = results['rewards/raw'].mean(dim=0, keepdim=True) # (1)
+            loss_total = results['loss/total'].unsqueeze(0) # (1)
+            loss_policy = results['loss/policy'].unsqueeze(0) # (1)
+            loss_value = results['loss/value'].unsqueeze(0) # (1)
+            loss_qa = results['loss/qa'].unsqueeze(0) # (1)
+            loss_qka = results['loss/qka'].unsqueeze(0) # (1)
+            reward_penalized = torch.mean(reduce_sum(results['rewards/penalized'], results['knowledges_attention_mask'], axis=1)).unsqueeze(0) # (1)
+            reward_kl = torch.mean(reduce_sum(results['rewards/kl'], results['knowledges_attention_mask'], axis=1)).unsqueeze(0) # (1)
+            reward_normalized = results['rewards/normalized'].mean(dim=0, keepdim=True) # (1)
+            reward_raw = results['rewards/raw'].mean(dim=0, keepdim=True) # (1)
 
-        corrects = accelerator.gather(results['corrects']) # (num_gpus * B)
-        losses_total = accelerator.gather(loss_total) # (num_gpus)
-        losses_policy = accelerator.gather(loss_policy) # (num_gpus)
-        losses_value = accelerator.gather(loss_value) # (num_gpus)
-        losses_qa = accelerator.gather(loss_qa) # (num_gpus)
-        losses_qka = accelerator.gather(loss_qka) # (num_gpus)
-        rewards_penalized = accelerator.gather(reward_penalized) # (num_gpus)
-        rewards_kl = accelerator.gather(reward_kl) # (num_gpus)
-        rewards_normalized = accelerator.gather(reward_normalized) # (num_gpus)
-        rewards_raw = accelerator.gather(reward_raw) # (num_gpus)
+            corrects = accelerator.gather(results['corrects']) # (num_gpus * B)
+            corrects_knowless = accelerator.gather(results['corrects_knowless']) # (num_gpus * B)
+            losses_total = accelerator.gather(loss_total) # (num_gpus)
+            losses_policy = accelerator.gather(loss_policy) # (num_gpus)
+            losses_value = accelerator.gather(loss_value) # (num_gpus)
+            losses_qa = accelerator.gather(loss_qa) # (num_gpus)
+            losses_qka = accelerator.gather(loss_qka) # (num_gpus)
+            rewards_penalized = accelerator.gather(reward_penalized) # (num_gpus)
+            rewards_kl = accelerator.gather(reward_kl) # (num_gpus)
+            rewards_normalized = accelerator.gather(reward_normalized) # (num_gpus)
+            rewards_raw = accelerator.gather(reward_raw) # (num_gpus)
 
-        acc = corrects.float().mean().item()
-        loss_total = losses_total.mean().item()
-        loss_policy = losses_policy.mean().item()
-        loss_value = losses_value.mean().item()
-        loss_qa = losses_qa.mean().item()
-        loss_qka = losses_qka.mean().item()
-        reward_penalized = rewards_penalized.mean().item()
-        reward_kl = rewards_kl.mean().item()
-        reward_normalized = rewards_normalized.mean().item()
-        reward_raw = rewards_raw.mean().item()
+            acc = corrects.float().mean().item()
+            acc_knowless = corrects_knowless.float().mean().item()
+            acc_delta = acc - acc_knowless
+            loss_total = losses_total.mean().item()
+            loss_policy = losses_policy.mean().item()
+            loss_value = losses_value.mean().item()
+            loss_qa = losses_qa.mean().item()
+            loss_qka = losses_qka.mean().item()
+            reward_penalized = rewards_penalized.mean().item()
+            reward_kl = rewards_kl.mean().item()
+            reward_normalized = rewards_normalized.mean().item()
+            reward_raw = rewards_raw.mean().item()
 
-        # Logging
-        if not self.args.nolog and accelerator.is_main_process:
-            if step % self.args.log_interval == 0:
-                wandb.log({
-                    'train/step': step,
-                    'train/acc': acc,
-                    'train/loss/total': loss_total,
-                    'train/loss/policy': loss_policy,
-                    'train/loss/value': loss_value,
-                    'train/loss/qa': loss_qa,
-                    'train/loss/qka': loss_qka,
-                    'train/reward/penalized': reward_penalized,
-                    'train/reward/KL': reward_kl,
-                    'train/reward/normalized': reward_normalized,
-                    'train/reward/raw': reward_raw,
-                })
+            # Logging
+            if not self.args.nolog and accelerator.is_main_process:
+                if step % self.args.log_interval == 0:
+                    wandb.log({
+                        'train/step': step,
+                        'train/acc': acc,
+                        'train/acc_knowless': acc_knowless,
+                        'train/acc_delta': acc_delta,
+                        'train/loss/total': loss_total,
+                        'train/loss/policy': loss_policy,
+                        'train/loss/value': loss_value,
+                        'train/loss/qa': loss_qa,
+                        'train/loss/qka': loss_qka,
+                        'train/reward/penalized': reward_penalized,
+                        'train/reward/KL': reward_kl,
+                        'train/reward/normalized': reward_normalized,
+                        'train/reward/raw': reward_raw,
+                    })
 
     def valid(self, step):
         if self.args.eval_loop_cap is not None and self.args.eval_loop_cap == 0:
@@ -533,7 +586,7 @@ class PPOTrainer:
         accelerator.wait_for_everyone()
 
         with torch.no_grad():
-            corrects, task_ixs = [], []
+            corrects, corrects_knowless, task_ixs = [], [], []
             results_table = wandb.Table(columns=['step', 'id', 'task', 'question', 'knowledge', 'answer_ix', 'pred', 'correct', 'pred_knowless', 'correct_knowless', 'rectified'])
             for i, batch in enumerate(tqdm(self.eval_dataloader) if accelerator.is_main_process else self.eval_dataloader):
                 if self.args.eval_loop_cap is not None and i == self.args.eval_loop_cap:
@@ -564,6 +617,7 @@ class PPOTrainer:
                 results.update(reward_results)
 
                 corrects.append(results['corrects'])
+                corrects_knowless.append(results['corrects_knowless'])
                 task_ixs.append(results['task_ixs'])
 
                 if accelerator.is_main_process:
@@ -572,13 +626,16 @@ class PPOTrainer:
                                            results['preds'][0].item(), results['corrects'][0].item(), results['preds_knowless'][0].item(), results['corrects_knowless'][0].item(), results['rectifieds'][0].item())
 
         corrects = torch.cat(corrects, dim=0) # (N)
+        corrects_knowless = torch.cat(corrects_knowless, dim=0) # (N)
         task_ixs = torch.cat(task_ixs, dim=0) # (N)
 
         corrects = accelerator.gather(corrects) # (num_gpus * N)
+        corrects_knowless = accelerator.gather(corrects_knowless) # (num_gpus * N)
         task_ixs = accelerator.gather(task_ixs) # (num_gpus * N)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
         corrects = corrects[:len(self.eval_dataloader.dataset)]
+        corrects_knowless = corrects_knowless[:len(self.eval_dataloader.dataset)]
         task_ixs = task_ixs[:len(self.eval_dataloader.dataset)]
 
         acc_weighted = corrects.float().mean().item()
@@ -589,6 +646,14 @@ class PPOTrainer:
         corrects_by_task = {k: torch.stack(v, dim=0) for k, v in corrects_by_task.items()}
         acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
         acc_unweighted = np.mean(list(acc_by_task.values()))
+        corrects_knowless_by_task = defaultdict(list)
+        for task_ix, correct in zip(task_ixs, corrects_knowless):
+            task = self.eval_dataloader.dataset.tasks[task_ix]
+            corrects_knowless_by_task[task].append(correct)
+        corrects_knowless_by_task = {k: torch.stack(v, dim=0) for k, v in corrects_knowless_by_task.items()}
+        acc_knowless_by_task = {k: v.float().mean().item() for k, v in corrects_knowless_by_task.items()}
+        acc_unweighted_knowless = np.mean(list(acc_knowless_by_task.values()))
+        acc_unweighted_delta = acc_unweighted - acc_unweighted_knowless
 
         log_info(f'Evaluated [step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
         log_info('Accuracy by task:')
@@ -601,6 +666,8 @@ class PPOTrainer:
                 'eval/results_table': results_table,
                 'eval/acc_weighted': acc_weighted,
                 'eval/acc_unweighted': acc_unweighted,
+                'eval/acc_unweighted_knowless': acc_unweighted_knowless,
+                'eval/acc_unweighted_delta': acc_unweighted_delta,
             }
             for task, acc in acc_by_task.items():
                 stats[f'eval/acc/{task}'] = acc
@@ -760,7 +827,8 @@ class PPOTrainer:
 
         with torch.no_grad():
             rewards = []
-            for i, batch in enumerate(tqdm(self.train_dataloader) if accelerator.is_main_process else self.train_dataloader):
+            dataloader = self.train_dataloader_rl if self.args.half_half else self.train_dataloader
+            for i, batch in enumerate(tqdm(dataloader) if accelerator.is_main_process else dataloader):
                 if self.args.eval_loop_cap is not None and i == self.args.eval_loop_cap:
                     break
                 results = copy.deepcopy(batch)
@@ -788,7 +856,7 @@ class PPOTrainer:
 
         rewards = torch.cat(rewards, dim=0) # (N)
         rewards = accelerator.gather(rewards) # (num_gpus * N)
-        rewards = rewards[:len(self.train_dataloader.dataset)] # remove padding
+        rewards = rewards[:len(dataloader.dataset)] # remove padding
 
         old_mean, old_std = rewards.mean().item(), rewards.std().item()
         new_mean, new_std = 0.0, 1.0
@@ -818,12 +886,9 @@ class PPOTrainer:
             policy_linear_state_dict = accelerator.unwrap_model(self.policy_model.linear).state_dict()
             if not self.args.policy_value_sharing:
                 value_model_state_dict = accelerator.unwrap_model(self.value_model.model).state_dict()
-        # TODO: Make optimizer state loading work
-        # optimizer_state_dict = self.optimizer.state_dict()
         result = {
             'model': policy_model_state_dict,
             'linear': policy_linear_state_dict,
-            # 'optimizer': optimizer_state_dict,
             'step': step,
             'eval_accs': self.eval_accs,
         }
@@ -887,22 +952,33 @@ def main():
     tokenizer.max_knowledge_len = args.max_knowledge_len
 
     if args.mode == 'train':
-        train_dataset = QADataset(args, 'train', args.train_tasks, args.data_path, tokenizer)
-        # train ds is shuffled in its constructor
-        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=train_dataset.collate_fn)
-
+        if not args.half_half:
+            train_dataset = QADataset(args, 'train', args.train_tasks, args.data_path, tokenizer)
+            train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=train_dataset.collate_fn)
+            train_dataloader = accelerator.prepare(train_dataloader)
+            train_dataset_qa, train_dataset_rl = None, None
+            train_dataloader_qa, train_dataloader_rl = None, None
+        else:
+            train_dataset_qa = QADataset(args, 'train', args.train_tasks, args.data_path, tokenizer, 'qa')
+            train_dataset_rl = QADataset(args, 'train', args.train_tasks, args.data_path, tokenizer, 'rl')
+            train_dataloader_qa = DataLoader(train_dataset_qa, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=train_dataset_qa.collate_fn)
+            train_dataloader_rl = DataLoader(train_dataset_rl, batch_size=args.batch_size, shuffle=False, drop_last=True, collate_fn=train_dataset_rl.collate_fn)
+            train_dataloader_qa, train_dataloader_rl = accelerator.prepare(train_dataloader_qa, train_dataloader_rl)
+            train_dataset = None
+            train_dataloader = None
         eval_dataset = QADataset(args, 'dev', args.train_tasks, args.data_path, tokenizer)
         eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=eval_dataset.collate_fn)
-
-        train_dataloader, eval_dataloader = accelerator.prepare(train_dataloader, eval_dataloader)
+        eval_dataloader = accelerator.prepare(eval_dataloader)
 
     elif args.mode == 'eval':
         train_dataset = None
         train_dataloader = None
-
+        train_dataset_qa = None
+        train_dataset_rl = None
+        train_dataloader_qa = None
+        train_dataloader_rl = None
         eval_dataset = QADataset(args, args.eval_split, args.eval_tasks, args.data_path, tokenizer)
         eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=eval_dataset.collate_fn)
-
         eval_dataloader = accelerator.prepare(eval_dataloader)
 
     # Initialize models and optimizer
@@ -954,32 +1030,16 @@ def main():
         else:
             parameters = chain(policy.model.parameters(), policy.linear.parameters(), value.model.parameters())
         optimizer = torch.optim.Adam(parameters, lr=args.lr, eps=1e-5)
+        optimizer = accelerator.prepare(optimizer)
         args.total_steps = ceil_div(args.total_episodes, args.batch_size * int(os.environ['SLURM_GPUS_ON_NODE']) * int(os.environ['SLURM_JOB_NUM_NODES']))
         init_step = 0
         eval_accs = {}
 
-        # Load from checkpoint if continue training
-        # if args.load_from_ckpt is not None:
-        #     checkpoint = torch.load(args.load_from_ckpt)
-        #     policy.model.load_state_dict(checkpoint['model'], strict=False)
-        #     if args.policy_value_sharing:
-        #         policy.linear.load_state_dict(checkpoint['linear'])
-        #     else:
-        #         value.model.load_state_dict(checkpoint['value_model'], strict=False)
-        #     optimizer.load_state_dict(checkpoint['optimizer'])
-        #     init_step = checkpoint['step']
-        #     eval_accs = checkpoint['eval_accs']
-        #     checkpoint.clear()
-
-        #     # Reuse the reward normalization results
-        #     reward.read_reward_norm(args.reward_dir)
         if args.load_from_stageI_ckpt is not None:
             checkpoint = torch.load(args.load_from_stageI_ckpt, map_location='cpu')
             accelerator.unwrap_model(policy.model).load_state_dict(checkpoint['model'])
             accelerator.unwrap_model(ref_policy.model).load_state_dict(checkpoint['model'])
             checkpoint.clear()
-
-        optimizer = accelerator.prepare(optimizer)
 
     elif args.mode == 'eval':
         ref_policy = None
@@ -1024,6 +1084,8 @@ def main():
     trainer = PPOTrainer(
         args=args,
         train_dataloader=train_dataloader,
+        train_dataloader_qa=train_dataloader_qa,
+        train_dataloader_rl=train_dataloader_rl,
         eval_dataloader=eval_dataloader,
         ref_policy_model=ref_policy,
         policy_model=policy,

@@ -1,4 +1,4 @@
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Optional
 import torch
 import torch.nn.functional as F
 from transformers import T5ForConditionalGeneration
@@ -54,8 +54,12 @@ class Policy:
                 synced_gpus=True,
             ) # begins with 0 ([BOS]); ends with 1 ([EOS])
             knowledges_input_ids = knowledges_input_ids[:, 1:].contiguous() # no beginning; ends with 1 ([EOS])
+            knowledges_input_ids = F.pad(knowledges_input_ids, (0, self.tokenizer.max_knowledge_len - knowledges_input_ids.size(1)), value=self.tokenizer.pad_token_id) # (B, KL)
+            knowledges_attention_mask = (knowledges_input_ids != self.tokenizer.pad_token_id).long()
+            prefixed_knowledges_input_ids = None
+            prefixed_knowledges_attention_mask = None
         else:
-            knowledges_input_ids = unwrapped_model.generate(
+            prefixed_knowledges_input_ids = unwrapped_model.generate(
                 input_ids=questions_input_ids,
                 attention_mask=questions_attention_mask,
                 max_length=self.tokenizer.max_knowledge_len + 3,
@@ -67,9 +71,11 @@ class Policy:
                 forced_decoder_ids=[[1, 16113], [2, 10]], # 'Knowledge:' is 2 tokens under T5Tokenizer
                 synced_gpus=True,
             ) # begins with 0 ([BOS]); ends with 1 ([EOS])
-            knowledges_input_ids = knowledges_input_ids[:, 3:].contiguous() # no beginning; ends with 1 ([EOS])
-        knowledges_input_ids = F.pad(knowledges_input_ids, (0, self.tokenizer.max_knowledge_len - knowledges_input_ids.size(1)), value=self.tokenizer.pad_token_id) # (B, KL)
-        knowledges_attention_mask = (knowledges_input_ids != self.tokenizer.pad_token_id).long()
+            prefixed_knowledges_input_ids = prefixed_knowledges_input_ids[:, 1:].contiguous() # no beginning; ends with 1 ([EOS])
+            prefixed_knowledges_input_ids = F.pad(prefixed_knowledges_input_ids, (0, self.tokenizer.max_knowledge_len + 2 - prefixed_knowledges_input_ids.size(1)), value=self.tokenizer.pad_token_id) # (B, KL + 2)
+            prefixed_knowledges_attention_mask = (prefixed_knowledges_input_ids != self.tokenizer.pad_token_id).long() # (B, KL + 2)
+            knowledges_input_ids = prefixed_knowledges_input_ids[:, 2:].contiguous() # (B, KL)
+            knowledges_attention_mask = (knowledges_input_ids != self.tokenizer.pad_token_id).long() # (B, KL)
         knowledges_text = self.tokenizer.batch_decode(knowledges_input_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
 
         lowercased_knowledges = [knowledge.lower() for knowledge in knowledges_text]
@@ -86,6 +92,8 @@ class Policy:
             'lowercased_knowledges_text': lowercased_knowledges,
             'lowercased_knowledges_input_ids': lowercased_knowledges_input_ids, # (B, KL)
             'lowercased_knowledges_attention_mask': lowercased_knowledges_attention_mask, # (B, KL)
+            'prefixed_knowledges_input_ids': prefixed_knowledges_input_ids, # (B, KL + 2)
+            'prefixed_knowledges_attention_mask': prefixed_knowledges_attention_mask, # (B, KL + 2)
             # 'knowledges_logits': knowledges_logits, # (B, KL, V)
             # 'knowledges_logprobs': knowledges_logprobs, # (B, KL)
             # 'knowledges_entropy': knowledges_entropy, # (B, KL)
@@ -96,19 +104,30 @@ class Policy:
                      questions_attention_mask: torch.Tensor, # (B, QL)
                      knowledges_input_ids: torch.Tensor, # (B, KL)
                      knowledges_attention_mask: torch.Tensor, # (B, KL)
+                     prefixed_knowledges_input_ids: Optional[torch.Tensor], # (B, KL + 2)
+                     prefixed_knowledges_attention_mask: Optional[torch.Tensor], # (B, KL + 2)
                     ):
-
-        outputs = self.model(
-            input_ids=questions_input_ids,
-            attention_mask=questions_attention_mask,
-            labels=mask_pad(knowledges_input_ids, knowledges_attention_mask, -100),
-            return_dict=True,
-            output_attentions=False,
-            output_hidden_states=True,
-        )
-
-        knowledges_logits = outputs.logits # (B, KL, V)
-        logprobs = F.log_softmax(knowledges_logits, dim=-1)
+        if not self.policy_reward_sharing:
+            outputs = self.model(
+                input_ids=questions_input_ids,
+                attention_mask=questions_attention_mask,
+                labels=mask_pad(knowledges_input_ids, knowledges_attention_mask, -100),
+                return_dict=True,
+                output_attentions=False,
+                output_hidden_states=True,
+            )
+            knowledges_logits = outputs.logits # (B, KL, V)
+        else:
+            outputs = self.model(
+                input_ids=questions_input_ids,
+                attention_mask=questions_attention_mask,
+                labels=mask_pad(prefixed_knowledges_input_ids, prefixed_knowledges_attention_mask, -100),
+                return_dict=True,
+                output_attentions=False,
+                output_hidden_states=True,
+            )
+            knowledges_logits = outputs.logits[:, 2:, :] # (B, KL, V)
+        logprobs = F.log_softmax(knowledges_logits, dim=-1) # (B, KL, V)
         knowledges_logprobs = torch.gather(logprobs, 2, knowledges_input_ids[:, :, None]).squeeze(2) # (B, KL)
         knowledges_entropy = logits_to_entropy(knowledges_logits) # (B, KL)
 
@@ -119,7 +138,9 @@ class Policy:
         }
 
         if self.policy_value_sharing:
-            logits = self.linear(outputs.decoder_hidden_states[-1]).squeeze(-1) # (B, KL)
+            logits = self.linear(outputs.decoder_hidden_states[-1]).squeeze(-1) # (B, KL) or (B, KL + 2)
+            if self.policy_reward_sharing:
+                logits = logits[:, 2:]
             results.update({
                 'knowledges_value': mask_pad(logits, knowledges_attention_mask, 0), # (B, KL)
             })
