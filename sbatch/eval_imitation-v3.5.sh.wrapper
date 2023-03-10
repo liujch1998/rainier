@@ -23,4 +23,4 @@ accelerate launch \
     --mode eval --eval_baseline \
     --policy_reward_sharing --do_not_lowercase \
     --eval_tasks obqa,arc_e,arc_h,ai2sci_e,ai2sci_m,csqa,qasc,piqa,siqa,wg \
-    --load_from_ckpt ../runs_stageI/20230216-105655.3858812.train_imitation-v3.5_v3.4.6/model/ckp_50000.pth
+    --load_from_ckpt $5

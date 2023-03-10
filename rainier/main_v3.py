@@ -507,6 +507,23 @@ class PPOTrainer:
             loss = self.args.qa_coef * results['loss/qa'] + self.args.qka_coef * results['loss/qka']
             accelerator.backward(loss)
             self.optimizer.step()
+
+            loss_qa = results['loss/qa'].unsqueeze(0) # (1)
+            loss_qka = results['loss/qka'].unsqueeze(0) # (1)
+            corrects_knowless = accelerator.gather(results['corrects_knowless']) # (num_gpus * B)
+            losses_qa = accelerator.gather(loss_qa) # (num_gpus)
+            losses_qka = accelerator.gather(loss_qka) # (num_gpus)
+            acc_knowless = corrects_knowless.float().mean().item()
+            loss_qa = losses_qa.mean().item()
+            loss_qka = losses_qka.mean().item()
+            if not self.args.nolog and accelerator.is_main_process:
+                if step % self.args.log_interval == 0:
+                    wandb.log({
+                        'train/step': step,
+                        'train/acc_knowless': acc_knowless,
+                        'train/loss/qa': loss_qa,
+                        'train/loss/qka': loss_qka,
+                    })
         if not self.args.half_half or (self.args.half_half and step % 2 == 1):
             # Do multiple epochs of PPO training, with a fresh random shuffle in each epoch
             for ppo_epoch_idx in range(self.args.noptepochs):

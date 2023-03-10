@@ -18,3 +18,5 @@
 **/wandb/
 **/__pycache__/
 *.swp
+/rainier/utils/nlp_agent.py
+

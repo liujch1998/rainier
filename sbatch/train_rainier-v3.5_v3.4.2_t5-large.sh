@@ -9,7 +9,7 @@
 #SBATCH --time=72:00:00
 #SBATCH --output="/private/home/ljc/rainier/logs/%J.%x.out"
 
-wrapper="sbatch/train_rainier-v3.5.sh.wrapper"
+wrapper="sbatch/train_rainier-v3.4.sh.wrapper"
 cat $0
 echo "--------------------"
 cat $wrapper
@@ -18,4 +18,4 @@ echo "--------------------"
 time=$(date +"%Y%m%d-%H%M%S")
 srun --label ${wrapper} \
     ${time}.${SLURM_JOB_ID}.${SLURM_JOB_NAME} \
-    no "../runs_stageI/20230221-101020.4031090.train_imitation-v3.6.1_v3.6_t5-large/model/ckp_10000.pth"
+    no "../runs_stageI/20230221-101020.4031090.train_imitation-v3.6.1_v3.6_t5-large/model/ckp_10000.pth" 10.991435592430145 -0.010047605613580542

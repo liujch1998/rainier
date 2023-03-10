@@ -255,7 +255,7 @@ class Trainer:
             qka_loss = torch.tensor(0.0, device=qa_loss.device, dtype=qa_loss.dtype)
             if self.args.qka_loss:
                 qka_loss = self.qka_loss(batch)
-            loss = qk_loss + qa_loss + qka_loss
+            loss = qk_loss + qa_loss * self.args.qa_loss_multiplier + qka_loss
             losses.append(loss.detach().clone())
             qk_losses.append(qk_loss.detach().clone())
             qa_losses.append(qa_loss.detach().clone())
@@ -375,7 +375,7 @@ class Trainer:
                 qka_loss = torch.tensor(0.0, device=qa_loss.device, dtype=qa_loss.dtype)
                 if self.args.qka_loss:
                     qka_loss = self.qka_loss(batch)
-                loss = qk_loss + qa_loss + qka_loss
+                loss = qk_loss + qa_loss * self.args.qa_loss_multiplier + qka_loss
                 results = self.acc(batch)
                 losses.append(loss.detach().clone())
                 qk_losses.append(qk_loss.detach().clone())
@@ -429,19 +429,19 @@ class Trainer:
                 stats[f'eval/acc/{task}'] = acc
             wandb.log(stats)
 
-        if not self.args.nosave and accelerator.is_main_process:
-            prev_best_step = None if len(self.eval_losses) == 0 else min(self.eval_losses, key=self.eval_losses.get)
-            self.eval_losses[step] = loss
-            if prev_best_step is None or loss < self.eval_losses[prev_best_step]:
-                if prev_best_step is not None:
-                    try:
-                        os.remove(f'{self.args.model_dir}/ckp_{prev_best_step}.pth')
-                    except:
-                        log.warning(f'Cannot remove previous best ckpt!')
-                shutil.copy(f'{self.args.model_dir}/last.pth', f'{self.args.model_dir}/ckp_{step}.pth')
-                log_info(f'Best ckpt updated to [step {step}]')
-        else:
-            self.eval_losses[step] = loss
+        # if not self.args.nosave and accelerator.is_main_process:
+        #     prev_best_step = None if len(self.eval_losses) == 0 else min(self.eval_losses, key=self.eval_losses.get)
+        #     self.eval_losses[step] = loss
+        #     if prev_best_step is None or loss < self.eval_losses[prev_best_step]:
+        #         if prev_best_step is not None:
+        #             try:
+        #                 os.remove(f'{self.args.model_dir}/ckp_{prev_best_step}.pth')
+        #             except:
+        #                 log.warning(f'Cannot remove previous best ckpt!')
+        #         shutil.copy(f'{self.args.model_dir}/last.pth', f'{self.args.model_dir}/ckp_{step}.pth')
+        #         log_info(f'Best ckpt updated to [step {step}]')
+        # else:
+        #     self.eval_losses[step] = loss
 
         if not self.args.nosave and accelerator.is_main_process:
             prev_best_step = None if len(self.eval_accs) == 0 else max(self.eval_accs, key=self.eval_accs.get)
@@ -497,6 +497,7 @@ def get_args():
     parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--qka_loss', default=False, action='store_true')
     parser.add_argument('--half_half', default=False, action='store_true')
+    parser.add_argument('--qa_loss_multiplier', type=float, default=1.0)
 
     # other
     parser.add_argument(

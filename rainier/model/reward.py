@@ -336,8 +336,8 @@ class Reward:
             })
         if knowledges_input_ids is not None:
             result.update({
-                'loss/qa': qa_loss,
-                'loss/qka': knowless_qa_loss,
+                'loss/qa': knowless_qa_loss,
+                'loss/qka': qa_loss,
             })
         else:
             result.update({

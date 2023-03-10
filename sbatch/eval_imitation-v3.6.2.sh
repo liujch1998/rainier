@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=eval_imitation-v3.5
+#SBATCH --job-name=eval_imitation-v3.6.2
 #SBATCH --partition=devlab
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
@@ -18,4 +18,4 @@ echo "--------------------"
 time=$(date +"%Y%m%d-%H%M%S")
 srun --label ${wrapper} \
     ${time}.${SLURM_JOB_ID}.${SLURM_JOB_NAME} \
-    no large 4 "../runs_stageI/20230216-105655.3858812.train_imitation-v3.5_v3.4.6/model/ckp_50000.pth"
+    no large 4 "../runs_stageI/20230223-151106.4218514.train_imitation-v3.6.2_v3.6_no-qa-loss/model/ckp_4000.pth"
