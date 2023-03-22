@@ -388,19 +388,19 @@ class Trainer:
         qk_loss = torch.stack(qk_losses).mean(dim=0, keepdim=True) # (1)
         qa_loss = torch.stack(qa_losses).mean(dim=0, keepdim=True) # (1)
         qka_loss = torch.stack(qka_losses).mean(dim=0, keepdim=True) # (1)
-        corrects = torch.cat(corrects, dim=0) # (N)
-        task_ixs = torch.cat(task_ixs, dim=0) # (N)
+        corrects = torch.stack(corrects, dim=0) # (M, B)
+        task_ixs = torch.stack(task_ixs, dim=0) # (M, B)
 
         losses = accelerator.gather(loss) # (num_gpus)
         qk_losses = accelerator.gather(qk_loss) # (num_gpus)
         qa_losses = accelerator.gather(qa_loss) # (num_gpus)
         qka_losses = accelerator.gather(qka_loss) # (num_gpus)
-        corrects = accelerator.gather(corrects) # (num_gpus * N)
-        task_ixs = accelerator.gather(task_ixs) # (num_gpus * N)
+        corrects = accelerator.gather(corrects.unsqueeze(0)) # (num_gpus, M, B)
+        task_ixs = accelerator.gather(task_ixs.unsqueeze(0)) # (num_gpus, M, B)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
-        corrects = corrects[:len(self.eval_dataloader.dataset)]
-        task_ixs = task_ixs[:len(self.eval_dataloader.dataset)]
+        corrects = corrects.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
+        task_ixs = task_ixs.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
         
         loss = losses.mean().item()
         qk_loss = qk_losses.mean().item()

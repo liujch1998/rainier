@@ -59,10 +59,10 @@ datapath_by_task_and_split = {
     'sciq': {'default': 'sciq'},
     'quarel': {'default': 'quarel'},
     'quartz': {'default': 'quartz'},
-    'wsc273_': {'default': 'wsc273_'},
-    'copa_': {'default': 'copa_'},
-    'numersense_': {'default': 'numersense_'},
-    'truthfulqa_mc1': {'default': 'truthfulqa_mc1'},
+    'wsc273': {'default': 'wsc273'},
+    'copa': {'default': 'copa'},
+    'numersense_new': {'default': 'numersense_new'},
+    # 'truthfulqa_mc1': {'default': 'truthfulqa_mc1'},
 }
 
 # This does not lowercase the data, by default
@@ -143,7 +143,7 @@ class QADataset(Dataset):
                             'answer_ix': answer_ix,
                         })
                 log_info(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
-        elif self.data_path.endswith('.json'):
+        elif self.data_path.endswith('.json') and ('{task}' in self.data_path and '{split}' in self.data_path):
             for task_ix, task in enumerate(self.tasks):
                 skipped = 0
                 with open(self.data_path.replace('{task}', task).replace('{split}', self.split)) as f:
@@ -175,6 +175,24 @@ class QADataset(Dataset):
                             'knowledges': knowledges,
                         })
                 log_info(f'Loaded dataset for task {task} split {self.split}, skipped {skipped} instances')
+        elif self.data_path.endswith('.json'):
+            with open(self.data_path) as f:
+                js = json.load(f)
+                for item in js:
+                    q, a = item['query'], item['answer']
+                    choices = item['cands']
+                    answer_ix = item['answer_ix']
+                    knowledges = item['knowledges'][:self.args.num_samples]
+                    instances.append({
+                        'task': item['task'],
+                        'task_ix': self.tasks.index(item['task']),
+                        'split': self.split,
+                        'question': q,
+                        'choices': choices,
+                        'answer': a,
+                        'answer_ix': answer_ix,
+                        'knowledges': knowledges,
+                    })
         log_info(f'Loaded split {self.split} with {len(instances)} total instances')
         return instances
 
@@ -258,6 +276,7 @@ class QADataset(Dataset):
 
         if 'knowledges' in batch[0]:
             knowledgess = [item['knowledges'] + [''] * (self.args.num_samples - len(item['knowledges'])) for item in batch]
+            knowledgess = list(map(list, zip(*knowledgess))) # transpose the list
             knowledgess_tok = [self.tokenizer.batch_encode_plus(
                 knowledges,
                 return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.tokenizer.max_knowledge_len)
@@ -289,7 +308,7 @@ class QADataset(Dataset):
 
             result.update({
                 'knowledgess_text': knowledgess,
-                'knowledgess_input_ids': knowledgess_input_ids,
+                'knowledgess_input_ids': knowledgess_input_ids, # (K, B, KL)
                 'knowledegss_attention_mask': knowledgess_attention_mask,
                 'knowledgess_labels': knowledgess_labels,
                 'lowercased_knowledgess_text': lowercased_knowledgess,
@@ -642,18 +661,18 @@ class PPOTrainer:
                                            results['questions_text'][0], results['knowledges_text'][0], results['answer_ixs'][0].item(),
                                            results['preds'][0].item(), results['corrects'][0].item(), results['preds_knowless'][0].item(), results['corrects_knowless'][0].item(), results['rectifieds'][0].item())
 
-        corrects = torch.cat(corrects, dim=0) # (N)
-        corrects_knowless = torch.cat(corrects_knowless, dim=0) # (N)
-        task_ixs = torch.cat(task_ixs, dim=0) # (N)
+        corrects = torch.stack(corrects, dim=0) # (M, B)
+        corrects_knowless = torch.stack(corrects_knowless, dim=0) # (M, B)
+        task_ixs = torch.stack(task_ixs, dim=0) # (M, B)
 
-        corrects = accelerator.gather(corrects) # (num_gpus * N)
-        corrects_knowless = accelerator.gather(corrects_knowless) # (num_gpus * N)
-        task_ixs = accelerator.gather(task_ixs) # (num_gpus * N)
+        corrects = accelerator.gather(corrects.unsqueeze(0)) # (num_gpus, M, B)
+        corrects_knowless = accelerator.gather(corrects_knowless.unsqueeze(0)) # (num_gpus, M, B)
+        task_ixs = accelerator.gather(task_ixs.unsqueeze(0)) # (num_gpus, M, B)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
-        corrects = corrects[:len(self.eval_dataloader.dataset)]
-        corrects_knowless = corrects_knowless[:len(self.eval_dataloader.dataset)]
-        task_ixs = task_ixs[:len(self.eval_dataloader.dataset)]
+        corrects = corrects.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
+        corrects_knowless = corrects_knowless.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
+        task_ixs = task_ixs.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
 
         acc_weighted = corrects.float().mean().item()
         corrects_by_task = defaultdict(list)
@@ -793,15 +812,15 @@ class PPOTrainer:
                     })
                     inference_outputs.append(copy.deepcopy(item))
 
-        corrects = torch.cat(corrects, dim=0) # (N)
-        task_ixs = torch.cat(task_ixs, dim=0) # (N)
+        corrects = torch.stack(corrects, dim=0) # (M, B)
+        task_ixs = torch.stack(task_ixs, dim=0) # (M, B)
 
-        corrects = accelerator.gather(corrects) # (num_gpus * N)
-        task_ixs = accelerator.gather(task_ixs) # (num_gpus * N)
+        corrects = accelerator.gather(corrects.unsqueeze(0)) # (num_gpus, M, B)
+        task_ixs = accelerator.gather(task_ixs.unsqueeze(0)) # (num_gpus, M, B)
 
         # Accelerator may pad the tensors to make them divisible by the total batch size
-        corrects = corrects[:len(self.eval_dataloader.dataset)]
-        task_ixs = task_ixs[:len(self.eval_dataloader.dataset)]
+        corrects = corrects.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
+        task_ixs = task_ixs.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
 
         acc_weighted = corrects.float().mean().item()
         corrects_by_task = defaultdict(list)
@@ -828,13 +847,52 @@ class PPOTrainer:
                 stats[f'eval/acc/{task}'] = acc
             wandb.log(stats)
 
-        if not self.args.nosave and accelerator.is_main_process:
-            knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
-            inference_path = os.path.join(self.args.inference_dir, f'inference_rainier-ckp{step}.knowledge_rainier-ckp{step}.json')
-            with open(knowledge_path, 'w') as f:
-                json.dump(knowledge_outputs, f, indent=4)
-            with open(inference_path, 'w') as f:
-                json.dump(inference_outputs, f, indent=4)
+        if not self.args.nosave:
+            def merge(path):
+                paths = [f'{path}.{i}' for i in range(accelerator.num_processes)]
+                outputss = []
+                for p in paths:
+                    with open(p, 'r') as f:
+                        outputss.append(json.load(f))
+                B = self.args.batch_size
+                outputsss = [[outputs[i:i+B] for i in range(0, len(outputs), B)] for outputs in outputss] # (num_gpus, M, B)
+                outputsss = list(map(list, zip(*outputsss))) # (M, num_gpus, B)
+                outputss = list(chain(*outputsss)) # (M * num_gpus, B)
+                outputs = list(chain(*outputss)) # (M * num_gpus * B)
+                outputs = outputs[:len(self.eval_dataloader.dataset)]
+                with open(path, 'w') as f:
+                    json.dump(outputs, f, indent=4)
+                for path in paths:
+                    os.remove(path)
+            if self.args.data_path.endswith('.json') and not ('{task}' in self.args.data_path and '{split}' in self.args.data_path):
+                inference_path = os.path.join(self.args.inference_dir, f'inference_rainier-ckp{step}.{self.args.data_path.split("/")[-1]}.{accelerator.process_index}') \
+                                if self.args.policy_reward_sharing else \
+                                os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.{self.args.data_path.split("/")[-1]}.{accelerator.process_index}')
+                with open(inference_path, 'w') as f:
+                    json.dump(inference_outputs, f, indent=4)
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    inference_path = os.path.join(self.args.inference_dir, f'inference_rainier-ckp{step}.{self.args.data_path.split("/")[-1]}') \
+                                    if self.args.policy_reward_sharing else \
+                                    os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.{self.args.data_path.split("/")[-1]}')
+                    merge(inference_path)
+            else:
+                knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json.{accelerator.process_index}')
+                inference_path = os.path.join(self.args.inference_dir, f'inference_rainier-ckp{step}.knowledge_rainier-ckp{step}.json.{accelerator.process_index}') \
+                                if self.args.policy_reward_sharing else \
+                                os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json.{accelerator.process_index}')
+                with open(knowledge_path, 'w') as f:
+                    json.dump(knowledge_outputs, f, indent=4)
+                with open(inference_path, 'w') as f:
+                    json.dump(inference_outputs, f, indent=4)
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    knowledge_path = os.path.join(self.args.knowledge_dir, f'knowledge_rainier-ckp{step}.json')
+                    inference_path = os.path.join(self.args.inference_dir, f'inference_rainier-ckp{step}.knowledge_rainier-ckp{step}.json') \
+                                    if self.args.policy_reward_sharing else \
+                                    os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
+                    merge(knowledge_path)
+                    merge(inference_path)
 
     """
     Internally set bias and gain terms based on the data from the dataloader
@@ -871,9 +929,9 @@ class PPOTrainer:
                 results.update(reward_results)
                 rewards.append(results['rewards/raw'])
 
-        rewards = torch.cat(rewards, dim=0) # (N)
-        rewards = accelerator.gather(rewards) # (num_gpus * N)
-        rewards = rewards[:len(dataloader.dataset)] # remove padding
+        rewards = torch.stack(rewards, dim=0) # (M, B)
+        rewards = accelerator.gather(rewards.unsqueeze(0)) # (num_gpus, M, B)
+        rewards = rewards.transpose(0, 1).flatten(0, 2)[:len(dataloader.dataset)] # (N)
 
         old_mean, old_std = rewards.mean().item(), rewards.std().item()
         new_mean, new_std = 0.0, 1.0
@@ -1096,6 +1154,8 @@ def main():
             ensembling=args.ensembling,
             do_not_lowercase=args.do_not_lowercase,
         )
+        if not args.policy_reward_sharing:
+            reward.model = accelerator.prepare(reward.model)
 
     # Set up trainer
     trainer = PPOTrainer(

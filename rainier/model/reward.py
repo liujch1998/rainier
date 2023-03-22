@@ -63,6 +63,8 @@ class Reward:
             B = questions_input_ids.size(0)
             knowledges_len = knowledges_attention_mask.sum(dim=1)
             for b in range(B):
+                if knowledges_len[b] == 1: # Empty knowledge
+                    continue
                 prompts_input_ids[b, questions_len[b]-1:questions_len[b]+2] = torch.tensor([3, 2, 29], dtype=torch.long, device=questions_input_ids.device)
                 prompts_input_ids[b, questions_len[b]+2:questions_len[b]+2+knowledges_len[b]] = knowledges_input_ids[b, :knowledges_len[b]]
                 prompts_attention_mask[b, questions_len[b]-1:questions_len[b]+2+knowledges_len[b]] = 1
