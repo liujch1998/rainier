@@ -744,17 +744,36 @@ class PPOTrainer:
                 knowledgess_text, knowledgess_input_ids, knowledgess_attention_mask = [], [], [] # [K * (B, KL)]
                 if step != -1: # If not baseline, generate knowledge
                     if 'knowledgess_input_ids' not in results:
-                        for j in range(self.args.num_samples):
-                            rollouts = self.policy_model.sample(
-                                questions_input_ids=results['questions_input_ids'],
-                                questions_attention_mask=results['questions_attention_mask'],
-                                top_p=self.args.top_p,
-                            )
-                            knowledgess_text.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_text'])
-                            knowledgess_input_ids.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'])
-                            knowledgess_attention_mask.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'])
-                        knowledgess_input_ids = torch.stack(knowledgess_input_ids, dim=0) # (K, B, KL)
-                        knowledgess_attention_mask = torch.stack(knowledgess_attention_mask, dim=0) # (K, B, KL)
+                        if self.args.use_mcts:
+                            from mcts import BatchedMCTS
+                            MCTS = BatchedMCTS(self.policy_model.tokenizer, self.policy_model, self.value_model, ref_policy=self.ref_policy_model, reward_model=self.reward_model,
+                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=10, num_sparse_actions=2,
+                                            kl_coef=0.0, # LJC: positive KL coef is not supported yet
+                                            sample=False, topp=1.0,
+                                            disable_cache=True, is_seq2seq=True, # LJC: cache is not supported yet for seq2seq model
+                                            )
+                            input_ids, attention_mask = results['questions_input_ids'], results['questions_attention_mask']
+                            output_ids, output_mask = MCTS.generate(input_ids, attention_mask)
+                            response_ids = output_ids[:, input_ids.size(1):] # (B * 1, RL)
+                            response_mask = output_mask[:, input_ids.size(1):]
+                            knowledges_text = self.policy_model.tokenizer.batch_decode(response_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True) # (B * 1)
+                            knowledges_text = [knowledge.lower() for knowledge in knowledges_text]
+                            knowledgess_text.append(knowledges_text)
+                            knowledges_tok = self.policy_model.tokenizer(knowledges_text, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.policy_model.tokenizer.max_knowledge_len)
+                            knowledges_input_ids, knowledges_attention_mask = knowledges_tok['input_ids'].to(response_ids.device), knowledges_tok['attention_mask'].to(response_mask.device)
+                            knowledgess_input_ids, knowledgess_attention_mask = knowledges_input_ids.unsqueeze(0), knowledges_attention_mask.unsqueeze(0) # (1, B, KL)
+                        else:
+                            for j in range(self.args.num_samples):
+                                rollouts = self.policy_model.sample(
+                                    questions_input_ids=results['questions_input_ids'],
+                                    questions_attention_mask=results['questions_attention_mask'],
+                                    top_p=self.args.top_p,
+                                )
+                                knowledgess_text.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_text'])
+                                knowledgess_input_ids.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_input_ids'])
+                                knowledgess_attention_mask.append(rollouts[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledges_attention_mask'])
+                            knowledgess_input_ids = torch.stack(knowledgess_input_ids, dim=0) # (K, B, KL)
+                            knowledgess_attention_mask = torch.stack(knowledgess_attention_mask, dim=0) # (K, B, KL)
                     else:
                         knowledgess_text = results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_text']
                         knowledgess_input_ids = results[('' if self.args.do_not_lowercase else 'lowercased_') + 'knowledgess_input_ids']
@@ -1117,7 +1136,15 @@ def main():
             checkpoint.clear()
 
     elif args.mode == 'eval':
-        ref_policy = None
+        ref_policy = Policy(
+            model_type=args.model_type,
+            model_ckpt=None,
+            tokenizer=tokenizer,
+            policy_value_sharing=args.policy_value_sharing,
+            policy_reward_sharing=args.policy_reward_sharing,
+            accelerator=accelerator,
+        )
+        ref_policy.model, ref_policy.linear = accelerator.prepare(ref_policy.model, ref_policy.linear)
         policy = Policy(
             model_type=args.model_type,
             model_ckpt=args.model_ckpt,
@@ -1130,19 +1157,26 @@ def main():
         init_step = 0
         eval_accs = {}
 
-        checkpoint = None
-        if args.load_from_ckpt is not None:
-            checkpoint = torch.load(args.load_from_ckpt, map_location='cpu')
-            policy.model.load_state_dict(checkpoint['model'], strict=False)
-            checkpoint.clear()
-        elif args.eval_ckpt is not None:
-            checkpoint = torch.load(args.eval_ckpt, map_location='cpu')
-            policy.model.load_state_dict(checkpoint, strict=False)
-            checkpoint.clear()
+        # checkpoint = None
+        # if args.load_from_ckpt is not None:
+        #     checkpoint = torch.load(args.load_from_ckpt, map_location='cpu')
+        #     policy.model.load_state_dict(checkpoint['model'], strict=False)
+        #     checkpoint.clear()
+        # elif args.eval_ckpt is not None:
+        #     checkpoint = torch.load(args.eval_ckpt, map_location='cpu')
+        #     policy.model.load_state_dict(checkpoint, strict=False)
+        #     checkpoint.clear()
 
         policy.model, policy.linear = accelerator.prepare(policy.model, policy.linear)
 
-        value = None
+        value = Value(
+            model_type=args.model_type,
+            model_ckpt=args.model_ckpt + '-value',
+            model=policy.model if args.policy_value_sharing else None,
+            tokenizer=tokenizer,
+        )
+        if not args.policy_value_sharing:
+            value.model = accelerator.prepare(value.model)
         reward = Reward(
             model_type=args.qa_model_type,
             model_ckpt=args.qa_model_ckpt,

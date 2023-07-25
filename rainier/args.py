@@ -106,6 +106,8 @@ def get_args():
         '--top_p', type=float, default=0.5, help='hyperparameter for nucleus sampling')
     parser.add_argument(
         '--ensembling', type=str, default='max', choices=['max', 'moe', 'poe', 'majority'], help='ensembling method for inference')
+    parser.add_argument(
+        '--use_mcts', default=False, action='store_true', help='whether to use MCTS for inference')
 
     # other
     parser.add_argument(

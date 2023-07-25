@@ -48,7 +48,7 @@ class T5ForTokenRegression(T5PreTrainedModel):
         self.model_parallel = False
         self.device_map = None
 
-    def forward_cls(
+    def forward(
         self,
         input_ids=None,
         attention_mask=None,

@@ -24,13 +24,46 @@ class Policy:
         # if policy_value_sharing:
         #     self.model = T5ForConditionalGenerationAndTokenRegression.from_pretrained(model_type)
         # else:
-        self.model = T5ForConditionalGeneration.from_pretrained(model_type)
+        self.model = T5ForConditionalGeneration.from_pretrained(model_type if model_ckpt is None else model_ckpt)
         self.linear = torch.nn.Linear(self.model.config.d_model, 1)
-        if model_ckpt is not None:
-            checkpoint = torch.load(model_ckpt, map_location='cpu')
-            self.model.load_state_dict(checkpoint, strict=False)
-            checkpoint.clear()
+        # if model_ckpt is not None:
+        #     checkpoint = torch.load(model_ckpt, map_location='cpu')
+        #     self.model.load_state_dict(checkpoint, strict=False)
+        #     checkpoint.clear()
         self.model.eval()
+
+    @torch.inference_mode()
+    def forward_mcts(self, input_ids, attention_mask, encoder_len, states=None, temperature=None):
+        '''
+        Inputs:
+        - input_ids: (B, QL + RL), encoder input is right-padded, decoder input is left-padded; should include the decoder start token
+        - attention_mask: (B, QL + RL)
+        - encoder_len: int, indicating QL
+        - states (is always None)
+        Ouptuts:
+        - priors: (B, V)
+        - next_states (is always None)
+        '''
+        assert states is None # LJC: states is not supported yet!
+
+        encoder_input_ids = input_ids[:, :encoder_len]
+        encoder_attention_mask = attention_mask[:, :encoder_len]
+        decoder_input_ids = input_ids[:, encoder_len:]
+        decoder_attention_mask = attention_mask[:, encoder_len:]
+
+        outputs = self.model(
+            input_ids=encoder_input_ids,
+            attention_mask=encoder_attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            decoder_attention_mask=decoder_attention_mask,
+            use_cache=False,
+            return_dict=True,
+            output_attentions=False,
+            output_hidden_states=False,
+        )
+        priors = outputs.logits[:, -1, :] / temperature # (B, V)
+        priors = torch.nn.functional.softmax(priors, dim=-1) # (B, V)
+        return dict(priors=priors, next_states=None)
 
     def sample(self,
                questions_input_ids: torch.Tensor, # (B, QL)
