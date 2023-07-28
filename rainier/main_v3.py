@@ -746,10 +746,11 @@ class PPOTrainer:
                     if 'knowledgess_input_ids' not in results:
                         if self.args.use_mcts:
                             from mcts import BatchedMCTS
-                            MCTS = BatchedMCTS(self.policy_model.tokenizer, self.policy_model, self.value_model, ref_policy=self.ref_policy_model, reward_model=self.reward_model,
-                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=10, num_sparse_actions=2,
-                                            kl_coef=0.0, # LJC: positive KL coef is not supported yet
-                                            sample=False, topp=1.0,
+                            MCTS = BatchedMCTS(self.policy_model.tokenizer, self.policy_model, self.value_model, ref_policy=self.ref_policy_model, reward_model=None,
+                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=20, num_sparse_actions=20, pb_c_init=8.0, temperature=1.0,
+                                            init_v_with_parent=True, kl_coef=0.2, clamp_kl=False, # LJC: positive KL coef is not supported yet
+                                            sample=False, topp=1.0, # LJC: sampling is not supported yet
+                                            reward_gain=1.0, reward_bias=0.0, # LJC: placeholders
                                             disable_cache=True, is_seq2seq=True, # LJC: cache is not supported yet for seq2seq model
                                             )
                             input_ids, attention_mask = results['questions_input_ids'], results['questions_attention_mask']
