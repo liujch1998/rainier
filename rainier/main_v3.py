@@ -747,22 +747,26 @@ class PPOTrainer:
                         if self.args.use_mcts:
                             from mcts import BatchedMCTS
                             MCTS = BatchedMCTS(self.policy_model.tokenizer, self.policy_model, self.value_model, ref_policy=self.ref_policy_model, reward_model=None,
-                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=20, num_sparse_actions=20, pb_c_init=8.0, temperature=1.0,
-                                            init_v_with_parent=True, kl_coef=0.2, clamp_kl=False, # LJC: positive KL coef is not supported yet
-                                            sample=False, topp=1.0, # LJC: sampling is not supported yet
+                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=10, num_sparse_actions=10, pb_c_init=8.0, temperature=1.0,
+                                            init_v_with_parent=True, kl_coef=0.2, clamp_kl=False,
+                                            sample=(self.args.top_p != 0.0), topp=self.args.top_p,
                                             reward_gain=1.0, reward_bias=0.0, # LJC: placeholders
                                             disable_cache=True, is_seq2seq=True, # LJC: cache is not supported yet for seq2seq model
                                             )
                             input_ids, attention_mask = results['questions_input_ids'], results['questions_attention_mask']
-                            output_ids, output_mask = MCTS.generate(input_ids, attention_mask)
-                            response_ids = output_ids[:, input_ids.size(1):] # (B * 1, RL)
-                            response_mask = output_mask[:, input_ids.size(1):]
-                            knowledges_text = self.policy_model.tokenizer.batch_decode(response_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True) # (B * 1)
-                            knowledges_text = [knowledge.lower() for knowledge in knowledges_text]
-                            knowledgess_text.append(knowledges_text)
-                            knowledges_tok = self.policy_model.tokenizer(knowledges_text, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.policy_model.tokenizer.max_knowledge_len)
-                            knowledges_input_ids, knowledges_attention_mask = knowledges_tok['input_ids'].to(response_ids.device), knowledges_tok['attention_mask'].to(response_mask.device)
-                            knowledgess_input_ids, knowledgess_attention_mask = knowledges_input_ids.unsqueeze(0), knowledges_attention_mask.unsqueeze(0) # (1, B, KL)
+                            for _ in range(self.args.num_samples):
+                                output_ids, output_mask = MCTS.generate(input_ids, attention_mask)
+                                response_ids = output_ids[:, input_ids.size(1):] # (B * 1, RL)
+                                response_mask = output_mask[:, input_ids.size(1):]
+                                knowledges_text = self.policy_model.tokenizer.batch_decode(response_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True) # (B * 1)
+                                knowledges_text = [knowledge.lower() for knowledge in knowledges_text]
+                                knowledgess_text.append(knowledges_text)
+                                knowledges_tok = self.policy_model.tokenizer(knowledges_text, return_tensors='pt', padding='max_length', truncation='longest_first', max_length=self.policy_model.tokenizer.max_knowledge_len)
+                                knowledges_input_ids, knowledges_attention_mask = knowledges_tok['input_ids'].to(response_ids.device), knowledges_tok['attention_mask'].to(response_mask.device)
+                                knowledgess_input_ids.append(knowledges_input_ids)
+                                knowledgess_attention_mask.append(knowledges_attention_mask)
+                            knowledgess_input_ids = torch.stack(knowledgess_input_ids, dim=0) # (K, B, KL)
+                            knowledgess_attention_mask = torch.stack(knowledgess_attention_mask, dim=0) # (K, B, KL)
                         else:
                             for j in range(self.args.num_samples):
                                 rollouts = self.policy_model.sample(
@@ -1016,17 +1020,18 @@ def main():
                     ensure_dir(d)
 
         elif args.mode == 'eval':
-            if args.load_from_ckpt is not None:
-                args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
-                args.save_dir = args.save_dir.replace('runs', 'eval')
-                ckp = args.load_from_ckpt.split('ckp_')[-1].strip('.pth')
-                args.save_dir += f'_ckp-{ckp}'
-            elif args.eval_ckpt is not None:
-                args.save_dir = os.path.dirname(args.eval_ckpt)
-            else:
-                log.error('You must provide either --ckpt or --load_from_ckpt!')
-                exit(-1)
-            args.run_name = args.save_dir.split('/')[-1]
+            args.save_dir = f'../eval/{args.run_name}'
+            # if args.load_from_ckpt is not None:
+            #     args.save_dir = os.path.dirname(os.path.dirname(args.load_from_ckpt))
+            #     args.save_dir = args.save_dir.replace('runs', 'eval')
+            #     ckp = args.load_from_ckpt.split('ckp_')[-1].strip('.pth')
+            #     args.save_dir += f'_ckp-{ckp}'
+            # elif args.eval_ckpt is not None:
+            #     args.save_dir = os.path.dirname(args.eval_ckpt)
+            # else:
+            #     log.error('You must provide either --ckpt or --load_from_ckpt!')
+            #     exit(-1)
+            # args.run_name = args.save_dir.split('/')[-1]
             args.knowledge_dir = os.path.join(args.save_dir, 'knowledge')
             args.inference_dir = os.path.join(args.save_dir, 'inference')
             if accelerator.is_main_process:
