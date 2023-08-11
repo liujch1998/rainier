@@ -747,11 +747,12 @@ class PPOTrainer:
                         if self.args.use_mcts:
                             from mcts import BatchedMCTS
                             MCTS = BatchedMCTS(self.policy_model.tokenizer, self.policy_model, self.value_model, ref_policy=self.ref_policy_model, reward_model=None,
-                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=10, num_sparse_actions=10, pb_c_init=8.0, temperature=1.0,
+                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=10, num_sparse_actions=10, pb_c_init=8.0, te=2.0, temperature=1.0,
                                             init_v_with_parent=True, kl_coef=0.2, clamp_kl=False,
                                             sample=(self.args.top_p != 0.0), topp=self.args.top_p,
                                             reward_gain=1.0, reward_bias=0.0, # LJC: placeholders
                                             disable_cache=True, is_seq2seq=True, # LJC: cache is not supported yet for seq2seq model
+                                            show_token_progress=False,
                                             )
                             input_ids, attention_mask = results['questions_input_ids'], results['questions_attention_mask']
                             for _ in range(self.args.num_samples):
