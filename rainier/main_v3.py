@@ -747,12 +747,13 @@ class PPOTrainer:
                         if self.args.use_mcts:
                             from mcts import BatchedMCTS
                             MCTS = BatchedMCTS(self.policy_model.tokenizer, self.policy_model, self.value_model, ref_policy=self.ref_policy_model, reward_model=None,
-                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=10, num_sparse_actions=10, pb_c_init=8.0, te=2.0, temperature=1.0,
+                                            batch_size=self.args.batch_size * 1, response_len=self.policy_model.tokenizer.max_knowledge_len, num_simulations=10, num_sparse_actions=10, pb_c_init=8.0, te=1.0, temperature=1.0,
                                             init_v_with_parent=True, kl_coef=0.2, clamp_kl=False,
                                             sample=(self.args.top_p != 0.0), topp=self.args.top_p,
                                             reward_gain=1.0, reward_bias=0.0, # LJC: placeholders
                                             disable_cache=True, is_seq2seq=True, # LJC: cache is not supported yet for seq2seq model
                                             show_token_progress=False,
+                                            debug=False, visualize=False, # visualize_dir=f'{self.args.save_dir}/trees',
                                             )
                             input_ids, attention_mask = results['questions_input_ids'], results['questions_attention_mask']
                             for _ in range(self.args.num_samples):
@@ -847,31 +848,6 @@ class PPOTrainer:
         corrects = corrects.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
         task_ixs = task_ixs.transpose(0, 1).flatten(0, 2)[:len(self.eval_dataloader.dataset)] # (N)
 
-        acc_weighted = corrects.float().mean().item()
-        corrects_by_task = defaultdict(list)
-        for task_ix, correct in zip(task_ixs, corrects):
-            task = self.eval_dataloader.dataset.tasks[task_ix]
-            corrects_by_task[task].append(correct)
-        corrects_by_task = {k: torch.stack(v, dim=0) for k, v in corrects_by_task.items()}
-        acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
-        acc_unweighted = np.mean(list(acc_by_task.values()))
-
-        log_info(f'Evaluated [step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
-        log_info('Accuracy by task:')
-        for task, acc in acc_by_task.items():
-            log_info(f'\t{task} = {acc:.4f}')
-
-        if not self.args.nolog and accelerator.is_main_process:
-            stats = {
-                'eval/step': step,
-                'eval/results_table': results_table,
-                'eval/acc_weighted': acc_weighted,
-                'eval/acc_unweighted': acc_unweighted,
-            }
-            for task, acc in acc_by_task.items():
-                stats[f'eval/acc/{task}'] = acc
-            wandb.log(stats)
-
         if not self.args.nosave:
             def merge(path):
                 paths = [f'{path}.{i}' for i in range(accelerator.num_processes)]
@@ -918,6 +894,33 @@ class PPOTrainer:
                                     os.path.join(self.args.inference_dir, f'inference_{self.args.qa_model_type.split("/")[-1]}.knowledge_rainier-ckp{step}.json')
                     merge(knowledge_path)
                     merge(inference_path)
+
+        acc_weighted = corrects.float().mean().item()
+        corrects_by_task = defaultdict(list)
+        for i, (task_ix, correct) in enumerate(zip(task_ixs, corrects)):
+            if task_ix < 0 or task_ix >= len(self.eval_dataloader.dataset.tasks):
+                log_info(f'{i}: task_ix = {task_ix}')
+            task = self.eval_dataloader.dataset.tasks[task_ix]
+            corrects_by_task[task].append(correct)
+        corrects_by_task = {k: torch.stack(v, dim=0) for k, v in corrects_by_task.items()}
+        acc_by_task = {k: v.float().mean().item() for k, v in corrects_by_task.items()}
+        acc_unweighted = np.mean(list(acc_by_task.values()))
+
+        log_info(f'Evaluated [step {step}] acc_weighted = {acc_weighted:.4f} | acc_unweighted = {acc_unweighted:.4f}')
+        log_info('Accuracy by task:')
+        for task, acc in acc_by_task.items():
+            log_info(f'\t{task} = {acc:.4f}')
+
+        if not self.args.nolog and accelerator.is_main_process:
+            stats = {
+                'eval/step': step,
+                'eval/results_table': results_table,
+                'eval/acc_weighted': acc_weighted,
+                'eval/acc_unweighted': acc_unweighted,
+            }
+            for task, acc in acc_by_task.items():
+                stats[f'eval/acc/{task}'] = acc
+            wandb.log(stats)
 
     """
     Internally set bias and gain terms based on the data from the dataloader
@@ -1121,6 +1124,7 @@ def main():
             kl_coef=args.kl_coef,
             ensembling=args.ensembling,
             do_not_lowercase=args.do_not_lowercase,
+            no_knowless_expert=args.no_knowless_expert,
         )
         if not args.policy_reward_sharing:
             reward.model = accelerator.prepare(reward.model)
@@ -1194,6 +1198,7 @@ def main():
             kl_coef=args.kl_coef,
             ensembling=args.ensembling,
             do_not_lowercase=args.do_not_lowercase,
+            no_knowless_expert=args.no_knowless_expert,
         )
         if not args.policy_reward_sharing:
             reward.model = accelerator.prepare(reward.model)

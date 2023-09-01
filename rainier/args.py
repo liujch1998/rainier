@@ -107,6 +107,8 @@ def get_args():
     parser.add_argument(
         '--ensembling', type=str, default='max', choices=['max', 'moe', 'poe', 'majority'], help='ensembling method for inference')
     parser.add_argument(
+        '--no_knowless_expert', action='store_true', default=False, help='whether to use knowless expert for inference')
+    parser.add_argument(
         '--use_mcts', default=False, action='store_true', help='whether to use MCTS for inference')
 
     # other

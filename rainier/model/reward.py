@@ -19,6 +19,7 @@ class Reward:
                  kl_coef,
                  ensembling,
                  do_not_lowercase,
+                 no_knowless_expert,
                 ):
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -26,6 +27,7 @@ class Reward:
         self.kl_coef = kl_coef
         self.ensembling = ensembling
         self.do_not_lowercase = do_not_lowercase
+        self.no_knowless_expert = no_knowless_expert
 
         self.gain, self.bias = None, None
 
@@ -387,8 +389,9 @@ class Reward:
             override_gain, override_bias,
             skip_reward=True,
         )
-        answer_logitsss.append(knowless_results['answer_logitss'])
-        answer_probsss.append(knowless_results['answer_probss'])
+        if not self.no_knowless_expert or len(knowledgess_input_ids) == 0:
+            answer_logitsss.append(knowless_results['answer_logitss'])
+            answer_probsss.append(knowless_results['answer_probss'])
 
         for (knowlegdes_input_ids, knowledges_attention_mask) in zip(knowledgess_input_ids, knowledgess_attention_mask):
             results = self.get_reward(
