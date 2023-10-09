@@ -1,44 +1,12 @@
 # Rainier: Reinforced Knowledge Introspector
 
-This repo hosts the code for the paper, [Rainier: Reinforced Knowledge Introspector for Commonsense Question Answering](https://arxiv.org/pdf/2210.03078.pdf)
+This repo hosts the code for the paper, [Rainier: Reinforced Knowledge Introspector for Commonsense Question Answering](https://arxiv.org/pdf/2210.03078.pdf), presented at EMNLP 2022.
 
 ## Resources
 
-**Model**: Our Rainier model is now on huggingface model hub!
-```python
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+**Model**: Our Rainier model is now on huggingface model hub! [[policy]](https://huggingface.co/liujch1998/rainier-large) [[value]](https://huggingface.co/liujch1998/rainier-large-value)
 
-tokenizer = T5Tokenizer.from_pretrained('t5-large')
-model = T5ForConditionalGeneration.from_pretrained('liujch1998/rainier-large')
-
-question = "Sydney rubbed Addison’s head because she had a horrible headache. " \
-           "What will happen to Sydney? \\n " \
-           "(A) drift to sleep (B) receive thanks (C) be reprimanded"
-input_ids = tokenizer(question, return_tensors='pt').input_ids
-output_ids = model.generate(input_ids, do_sample=True, top_p=0.5, num_return_sequences=10)
-knowledges = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-print(list(set(knowledges)))
-```
-Outputs:
-> Sydney is a good friend to Addison.
->
-> Sydney is a kind person.
->
-> One should be thankful for the help of others.
->
-> Rubbed head is a good way to relieve headaches.
->
-> The head is a very sensitive area.
->
-> One should be grateful for the help of others.
->
-> The head is the most sensitive part of the body.
->
-> The person who rubs the head is a good person.
->
-> Sydney will be grateful.
->
-> The head is a sensitive area.
+Usage: Please see Rainier's [huggingface model card](https://huggingface.co/liujch1998/rainier-large)
 
 **Knowledge**: We release the commonsense datasets augmented with Rainier-generated knowledge.
 You can download the `knowledge_rainier.json` file from [our Google Drive folder](https://drive.google.com/drive/folders/1GsuWpYvb4oAHxapMPizbEuWLZlpHUujG?usp=sharing).
@@ -141,3 +109,16 @@ Some flags you can set (see the full list in `args.py`):
 
 Make sure to run `python extract_model_from_ckpt_stageII.py --load_from_ckpt ../runs/[path-to-best].pth` after the training, so that you can use the trained Rainier model for inference.
 
+## Citation
+
+If you find this repo useful, please cite our paper:
+```
+@article{Liu2022RainierRK,
+  title={Rainier: Reinforced Knowledge Introspector for Commonsense Question Answering},
+  author={Jiacheng Liu and Skyler Hallinan and Ximing Lu and Pengfei He and Sean Welleck and Hannaneh Hajishirzi and Yejin Choi},
+  journal={ArXiv},
+  year={2022},
+  volume={abs/2210.03078},
+  url={https://api.semanticscholar.org/CorpusID:252735191}
+}
+```

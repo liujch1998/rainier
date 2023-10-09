@@ -27,9 +27,10 @@ class Value:
             checkpoint.clear()
         self.model.eval()
         self.model.to(device)
-        self.model.encoder.parallelize(device_map=device_map)
-        self.model.decoder.parallelize(device_map=device_map)
-        self.model.model_parallel = True
+        if device_map is not None:
+            self.model.encoder.parallelize(device_map=device_map)
+            self.model.decoder.parallelize(device_map=device_map)
+            self.model.model_parallel = True
 
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.device = device
